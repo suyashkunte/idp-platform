@@ -1,0 +1,56 @@
+# The platform's own PR checks. The job id `verify` is the required status check in the main ruleset.
+name: platform-ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0              # diff-cover and spec-trace compare against origin/main
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Install workspace
+        run: uv sync --all-packages --frozen
+
+      - name: make verify
+        run: make verify
+
+      - name: pre-commit (incl. gitleaks secret scan)
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Validate plugin and marketplace (strict)
+        run: |
+          npm install --global --no-fund --no-audit @anthropic-ai/claude-code@2.1.292
+          claude plugin validate --strict plugins/idp-agentic
+          claude plugin validate --strict .
+
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports
+          path: reports/
+          if-no-files-found: ignore
