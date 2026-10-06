@@ -1,0 +1,68 @@
+[project]
+name = "idp-platform"
+version = "0.0.0"
+description = "Intelligent Delivery Pipeline platform workspace (not published)"
+requires-python = ">=3.12"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+idp-gate = { workspace = true }
+
+[dependency-groups]
+dev = [
+  "idp-gate",
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "diff-cover>=9.2",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "types-PyYAML>=6.0",
+  "types-jsonschema>=4.23",
+  "bandit>=1.8",
+  "pre-commit>=4.0",
+]
+
+# ---------------------------------------------------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "C4", "PT", "SIM", "RUF"]
+ignore = ["S101"]                                     # asserts are how pytest works
+
+[tool.ruff.lint.isort]
+known-first-party = ["idp_gate"]
+
+[tool.ruff.lint.per-file-ignores]
+"plugins/**/hooks/scripts/*.py" = ["UP"]              # hooks must run on stdlib Python 3.9+
+"**/tests/**" = ["S603", "S607"]                      # tests run subprocesses on purpose
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["packages"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers -q"
+testpaths = ["packages", "tests"]
+markers = [
+  "ac(id): acceptance criterion id, e.g. IDP-214:AC-2",
+  "p0", "p1", "critical", "smoke", "quarantine",
+]
+
+[tool.coverage.run]
+source = ["packages"]
+branch = true
+
+[tool.coverage.report]
+omit = ["*/tests/*"]
+show_missing = true
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]

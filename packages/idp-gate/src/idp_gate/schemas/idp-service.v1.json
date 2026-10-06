@@ -1,0 +1,502 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/suyashkunte/idp-platform/schemas/idp-service.v1.json",
+  "title": "IDP service contract (idp.yaml) v1",
+  "description": "How an application declares itself to the Intelligent Delivery Pipeline. See docs/platform/service-contract.md.",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "const": "idp.dev/v1"
+    },
+    "kind": {
+      "const": "Service"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{1,38}[a-z0-9]$",
+          "description": "DNS-safe; namespace suffix, ECR repo, DB name"
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "tracker": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "jira"
+              ]
+            },
+            "project": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9]{1,9}$"
+            },
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "project"
+          ]
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "owner",
+        "tier",
+        "tracker"
+      ]
+    },
+    "spec": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "web-api",
+            "worker"
+          ],
+          "description": "Later: internal-api, cron, static-site"
+        },
+        "target": {
+          "enum": [
+            "kubernetes"
+          ],
+          "default": "kubernetes"
+        },
+        "build": {
+          "type": "object",
+          "properties": {
+            "profile": {
+              "enum": [
+                "python-uv",
+                "dockerfile"
+              ]
+            },
+            "dockerfile": {
+              "type": "string",
+              "default": "Dockerfile"
+            },
+            "context": {
+              "type": "string",
+              "default": "."
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false,
+          "required": [
+            "profile"
+          ]
+        },
+        "runtime": {
+          "type": "object",
+          "properties": {
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "health": {
+              "type": "object",
+              "properties": {
+                "live": {
+                  "type": "string",
+                  "pattern": "^/"
+                },
+                "ready": {
+                  "type": "string",
+                  "pattern": "^/"
+                },
+                "startup": {
+                  "type": "string",
+                  "pattern": "^/"
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false,
+              "required": [
+                "live",
+                "ready"
+              ]
+            },
+            "metrics": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "pattern": "^/"
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            },
+            "resources": {
+              "type": "object",
+              "properties": {
+                "cpu": {
+                  "type": "string"
+                },
+                "memory": {
+                  "type": "string"
+                },
+                "memoryLimit": {
+                  "type": "string"
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            },
+            "replicas": {
+              "type": "object",
+              "properties": {
+                "dev": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 50
+                },
+                "int": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 50
+                },
+                "stg": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 50
+                },
+                "prod": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 50
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            },
+            "autoscaling": {
+              "type": "object",
+              "properties": {
+                "min": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "cpuTarget": {
+                  "type": "integer",
+                  "minimum": 10,
+                  "maximum": 95
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false,
+          "required": [
+            "port",
+            "health"
+          ]
+        },
+        "dependencies": {
+          "type": "object",
+          "properties": {
+            "postgres": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "migrations": {
+                  "type": "object",
+                  "properties": {
+                    "command": {
+                      "type": "string"
+                    },
+                    "downgrade": {
+                      "type": "string"
+                    },
+                    "policy": {
+                      "enum": [
+                        "expand-contract"
+                      ]
+                    }
+                  },
+                  "patternProperties": {
+                    "^x-": {}
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false,
+              "required": [
+                "enabled"
+              ]
+            },
+            "secrets": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              },
+              "uniqueItems": true
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "interfaces": {
+          "type": "object",
+          "properties": {
+            "openapi": {
+              "type": "string"
+            },
+            "contracts": {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "boolean"
+                },
+                "consumers": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "tests": {
+          "type": "object",
+          "properties": {
+            "smoke": {
+              "type": "boolean"
+            },
+            "api": {
+              "type": "boolean"
+            },
+            "e2e": {
+              "type": "boolean"
+            },
+            "perf": {
+              "type": "boolean"
+            },
+            "critical_journeys": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "delivery": {
+          "type": "object",
+          "properties": {
+            "slo": {
+              "type": "object",
+              "properties": {
+                "availability": {
+                  "type": "number",
+                  "exclusiveMinimum": 0.9,
+                  "maximum": 0.99999
+                },
+                "p95_read_ms": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "p95_write_ms": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            },
+            "canary": {
+              "type": "object",
+              "properties": {
+                "steps": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                  },
+                  "minItems": 1
+                },
+                "min_requests": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            },
+            "kpis": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "promql": {
+                    "type": "string"
+                  },
+                  "max_relative_drop": {
+                    "type": "number"
+                  }
+                },
+                "patternProperties": {
+                  "^x-": {}
+                },
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "promql"
+                ]
+              }
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "gates": {
+          "type": "object",
+          "properties": {
+            "overrides": {
+              "type": "object",
+              "propertyNames": {
+                "pattern": "^G[0-5]$"
+              },
+              "additionalProperties": {
+                "type": "object"
+              }
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        },
+        "agent": {
+          "type": "object",
+          "properties": {
+            "protected_paths": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "risk_defaults": {
+              "type": "object",
+              "additionalProperties": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            }
+          },
+          "patternProperties": {
+            "^x-": {}
+          },
+          "additionalProperties": false
+        }
+      },
+      "patternProperties": {
+        "^x-": {}
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "build",
+        "runtime"
+      ]
+    }
+  },
+  "patternProperties": {
+    "^x-": {}
+  },
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ]
+}
