@@ -1,0 +1,9 @@
+{
+  "name": "idp-agentic",
+  "version": "0.1.0",
+  "description": "Spec-driven ticket-to-PR workflow for any IDP-onboarded repo: intake, spec, failing tests, implementation, verification, independent review, docs and a draft PR, with deterministic guardrails.",
+  "author": { "name": "Suyash Kunte", "url": "https://github.com/suyashkunte" },
+  "homepage": "https://github.com/suyashkunte/idp-platform",
+  "repository": "https://github.com/suyashkunte/idp-platform",
+  "keywords": ["spec-driven", "tdd", "jira", "guardrails", "delivery-pipeline"]
+}

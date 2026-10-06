@@ -1,0 +1,8 @@
+# Paths agents may never edit (one glob per line). Added to the plugin's built-in defaults
+# (.git/**, .github/**, .claude/settings.json, this file, specs/*/APPROVED). Changes need a human PR + CODEOWNERS review.
+infra/**
+plugins/idp-agentic/hooks/**
+.claude-plugin/**
+.pre-commit-config.yaml
+pyproject.toml
+Makefile

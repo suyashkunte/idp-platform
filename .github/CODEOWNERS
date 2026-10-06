@@ -1,0 +1,8 @@
+# Demo mode (Q4): one owner. Guardrail paths are listed separately so tightening later is a one-line change per path.
+*                         @suyashkunte
+/.github/                 @suyashkunte
+/.claude/                 @suyashkunte
+/.claude-plugin/          @suyashkunte
+/plugins/idp-agentic/hooks/ @suyashkunte
+/infra/                   @suyashkunte
+/policy/                  @suyashkunte

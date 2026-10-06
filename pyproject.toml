@@ -40,7 +40,7 @@ ignore = ["S101"]                                     # asserts are how pytest w
 known-first-party = ["idp_gate"]
 
 [tool.ruff.lint.per-file-ignores]
-"plugins/**/hooks/scripts/*.py" = ["UP"]              # hooks must run on stdlib Python 3.9+
+"plugins/**/hooks/scripts/*.py" = ["UP", "S603", "S607"]  # stdlib Python 3.9+; runs fixed git/make commands only
 "**/tests/**" = ["S603", "S607"]                      # tests run subprocesses on purpose
 
 [tool.mypy]

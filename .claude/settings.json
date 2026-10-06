@@ -1,0 +1,38 @@
+{
+  "extraKnownMarketplaces": {
+    "idp-platform": {
+      "source": { "source": "github", "repo": "suyashkunte/idp-platform" }
+    }
+  },
+  "enabledPlugins": {
+    "idp-agentic@idp-platform": true
+  },
+  "permissions": {
+    "allow": [
+      "Read", "Grep", "Glob",
+      "Edit(packages/**)", "Edit(services/**)", "Edit(suites/**)", "Edit(specs/**)", "Edit(docs/**)",
+      "Edit(tools/**)", "Edit(plugins/idp-agentic/skills/**)", "Edit(plugins/idp-agentic/agents/**)", "Edit(tests/**)",
+      "Bash(make lint)", "Bash(make test)", "Bash(make test:*)", "Bash(make verify)", "Bash(make verify-fast)",
+      "Bash(make format:*)", "Bash(make spec-trace:*)", "Bash(make validate-plugin)",
+      "Bash(uv run pytest:*)", "Bash(uv run ruff:*)", "Bash(uv run mypy:*)", "Bash(uv run idp spec-trace:*)",
+      "Bash(uv run idp test-quality-lint:*)", "Bash(uv run idp validate:*)",
+      "Bash(git status)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)", "Bash(git branch:*)",
+      "Bash(git switch -c feature/*)", "Bash(git switch main)", "Bash(git pull --ff-only)",
+      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git push -u origin HEAD)", "Bash(git push -u origin feature/*)",
+      "Bash(gh pr create:*)", "Bash(gh pr view:*)", "Bash(gh pr checks:*)", "Bash(gh pr edit:*)", "Bash(gh pr diff:*)",
+      "Bash(gh run view:*)", "Bash(gh run list:*)", "Bash(gh label create:*)",
+      "mcp__atlassian__getJiraIssue", "mcp__atlassian__searchJiraIssuesUsingJql",
+      "mcp__atlassian__addCommentToJiraIssue", "mcp__atlassian__getTransitionsForJiraIssue",
+      "mcp__atlassian__transitionJiraIssue"
+    ],
+    "deny": [
+      "Read(./.env)", "Read(./.env.*)", "Read(./**/*.tfvars)", "Read(~/.aws/**)", "Read(~/.ssh/**)",
+      "Edit(.github/**)", "Edit(.claude/settings.json)", "Edit(.claude/idp-protected-paths.txt)",
+      "Edit(plugins/idp-agentic/hooks/**)", "Edit(infra/**)", "Edit(specs/*/APPROVED)",
+      "Bash(git push origin main:*)", "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git merge:*)",
+      "Bash(gh pr merge:*)", "Bash(gh pr review:*)", "Bash(make approve-spec:*)", "Bash(uv run idp approve-spec:*)",
+      "Bash(terraform apply:*)", "Bash(terraform destroy:*)", "Bash(kubectl apply:*)", "Bash(kubectl delete:*)",
+      "Bash(helm upgrade:*)", "Bash(helm install:*)", "Bash(curl:*)", "Bash(wget:*)", "Bash(rm -rf:*)"
+    ]
+  }
+}

@@ -14,7 +14,7 @@ metadata:
   name: studytimer                  # DNS-safe; becomes namespace suffix, ECR repo, DB name, dashboards label
   owner: suyash                     # team or person; CODEOWNERS default
   tier: 1                           # 1|2|3 → policy profile, SLO strictness, canary pace
-  tracker: { kind: jira, project: IDP, labels: [repo:studytimer] }
+  tracker: { kind: jira, site: suyashkunte.atlassian.net, project: IDP, labels: [repo:studytimer] }
 spec:
   type: web-api                     # web-api | worker | internal-api (later) | cron (later) | static-site (later)
   target: kubernetes                # kubernetes | lambda (later)

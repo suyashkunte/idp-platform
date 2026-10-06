@@ -36,6 +36,10 @@
                 "jira"
               ]
             },
+            "site": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]+\\.atlassian\\.net$"
+            },
             "project": {
               "type": "string",
               "pattern": "^[A-Z][A-Z0-9]{1,9}$"
@@ -53,6 +57,7 @@
           "additionalProperties": false,
           "required": [
             "kind",
+            "site",
             "project"
           ]
         }

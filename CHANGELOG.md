@@ -1,0 +1,13 @@
+# Changelog
+
+All notable changes to the IDP platform. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+versions follow [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+### Added
+- IDP-7: uv workspace (Python 3.12), Make contract, pre-commit with gitleaks.
+- IDP-8: `idp` CLI v0 (`spec-trace`, `test-quality-lint`, `approve-spec`, `validate`).
+- IDP-9: service contract schema `idp-service.v1` (draft), shipped inside `idp-gate`.
+- IDP-10: `idp-agentic` Claude Code plugin v0.1.0 (11 skills, 9 subagents, 4 guardrail hooks) and marketplace.
+- IDP-11: `platform-ci` workflow and `main-protection` ruleset.
+- IDP-5: bootstrap Terraform (state bucket, GitHub OIDC provider, smoke role, org budget) and OIDC smoke workflow.
