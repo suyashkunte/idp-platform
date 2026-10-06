@@ -167,7 +167,7 @@ idp-platform/
 │   │                                # manifest (release), values (render chart values from idp.yaml), scorecard, doctor
 │   └── idp-testkit/                 # fixtures, traced client, factories base, evidence pytest plugin, waits, k8s, slo_probe
 ├── services/gatekeeper/             # multi-tenant FastAPI on Lambda (Mangum), Alembic, tests
-├── schemas/                         # idp-service.v1.json, test-summary.v1, evidence-manifest.v1, release-manifest.v1, decision-record.v1
+│                                    # (JSON schemas ship INSIDE idp-gate: packages/idp-gate/src/idp_gate/schemas/, so `idp validate` works anywhere)
 ├── policy/profiles/{tier1,tier2,tier3}/g0..g5.yaml  policy/CHANGELOG.md
 ├── charts/
 │   ├── idp-service/                 # generic app chart (Rollout|Deployment, Service, Ingress, PDB, HPA, ExternalSecret, PodMonitor, NetworkPolicy)
