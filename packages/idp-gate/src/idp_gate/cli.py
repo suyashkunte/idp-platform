@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -14,9 +15,12 @@ def _cmd_spec_trace(args: argparse.Namespace) -> int:
     try:
         report = spec_trace.trace(args.ticket, Path(args.root))
     except FileNotFoundError as exc:
-        print(f"spec-trace: {exc}", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"ticket": args.ticket, "ok": False, "error": str(exc)}))
+        else:
+            print(f"spec-trace: {exc}", file=sys.stderr)
         return 1
-    print(spec_trace.render(report))
+    print(json.dumps(spec_trace.to_dict(report)) if args.json else spec_trace.render(report))
     return 0 if report.ok else 1
 
 
@@ -58,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("spec-trace", help="check every acceptance criterion has a tagged test")
     p.add_argument("ticket")
     p.add_argument("--root", default=".")
+    p.add_argument("--json", action="store_true", help="print a JSON object instead of text")
     p.set_defaults(func=_cmd_spec_trace)
 
     p = sub.add_parser("test-quality-lint", help="flag tests that cannot fail meaningfully")

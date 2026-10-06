@@ -84,3 +84,16 @@ def render(report: TraceReport) -> str:
         lines.append(f"  {'OK     ' if tests else 'MISSING'} {ac}" + (f"  <- {', '.join(tests)}" if tests else ""))
     lines.extend(f"  UNKNOWN {ac} cited by {', '.join(report.found[ac])}" for ac in report.unknown)
     return "\n".join(lines)
+
+
+def to_dict(report: TraceReport) -> dict[str, object]:
+    unknown = report.unknown
+    tests = {ac: sorted(set(report.found.get(ac, []))) for ac in sorted(report.required.union(unknown))}
+    return {
+        "ticket": report.ticket,
+        "ok": report.ok,
+        "required": sorted(report.required),
+        "missing": report.missing,
+        "unknown": unknown,
+        "tests": tests,
+    }
