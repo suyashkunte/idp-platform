@@ -62,7 +62,10 @@ spec:
 | `make lint` | yes | static checks; non-zero on findings |
 | `make test` | yes | unit tests; writes `$(REPORTS_DIR)/junit-unit.xml`, `coverage.xml` (Cobertura) |
 | `make test-component` | yes | component tests with real dependencies (testcontainers or similar) |
-| `make verify` | yes | everything a PR must pass locally (the plugin's Stop hook and CI both call this) |
+| `make verify` | yes | everything a PR must pass locally (CI calls this) |
+| `make verify-fast` | recommended | quick subset (lint + unit tests); the agent's Stop hook calls it |
+| `make spec-trace KEY=<KEY>` | yes | AC→test traceability (`idp spec-trace`); the Stop hook and verify call it |
+| `make format FILES=...` | recommended | format only the given files; the agent's PostToolUse hook calls it |
 | `make test-smoke` / `test-api` / `test-e2e` / `test-perf` | when `tests.*: true` | run against `BASE_URL`; write JUnit + `summary.json` into `REPORTS_DIR` |
 | `make sbom` / `make sca` | no | the build profile provides defaults |
 
