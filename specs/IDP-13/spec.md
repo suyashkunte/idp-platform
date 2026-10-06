@@ -57,9 +57,9 @@ first ticket run end to end through `/implement-ticket` (iteration 1 dry run). P
 - Q7: Should the JSON carry a version field (e.g. `"schema": "idp-spec-trace.v1"`) for future consumers? Proposed default: no, out of scope for this ticket; AC-1 fixes the key set.
 
 ## Traceability
-| AC | Planned tests |
-|----|---------------|
-| AC-1 | packages/idp-gate/tests/test_spec_trace.py::test_json_all_covered_prints_object_and_exits_0, packages/idp-gate/tests/test_spec_trace.py::test_json_output_is_sorted_and_deterministic |
-| AC-2 | packages/idp-gate/tests/test_spec_trace.py::test_json_uncovered_ac_listed_in_missing_and_exits_1 |
+| AC | Tests |
+|----|-------|
+| AC-1 | packages/idp-gate/tests/test_spec_trace.py::test_json_all_covered_prints_object_and_exits_0, packages/idp-gate/tests/test_spec_trace.py::test_json_flag_before_ticket_is_accepted, packages/idp-gate/tests/test_spec_trace.py::test_to_dict_returns_keys_in_spec_order, packages/idp-gate/tests/test_spec_trace.py::test_json_output_is_sorted_and_deterministic |
+| AC-2 | packages/idp-gate/tests/test_spec_trace.py::test_json_uncovered_ac_listed_in_missing_and_exits_1, packages/idp-gate/tests/test_spec_trace.py::test_json_spec_without_acs_is_not_ok |
 | AC-3 | packages/idp-gate/tests/test_spec_trace.py::test_json_missing_spec_prints_error_object_and_exits_1 |
-| AC-4 | packages/idp-gate/tests/test_spec_trace.py::test_without_json_flag_output_is_unchanged (plus the existing IDP-8 tests in the same file, which must pass unmodified) |
+| AC-4 | packages/idp-gate/tests/test_spec_trace.py::test_without_json_flag_output_is_unchanged, packages/idp-gate/tests/test_spec_trace.py::test_without_json_flag_missing_spec_still_reports_on_stderr (plus the existing IDP-8 tests in the same file, which must pass unmodified) |
