@@ -1,0 +1,35 @@
+# Proves GitHub Actions can authenticate to AWS with OIDC, with no stored keys (iteration 0 exit criterion).
+# The role it assumes has NO permissions, so the second step must fail: least privilege is checked too.
+name: oidc-smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/oidc-smoke.yml", "infra/terraform/live/bootstrap/**"]
+
+permissions:
+  id-token: write   # mint the GitHub OIDC token
+  contents: read
+
+jobs:
+  assume-role:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assume AWS role via OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_SMOKE_ROLE_ARN }}
+          aws-region: ap-southeast-2
+          role-session-name: oidc-smoke-${{ github.run_id }}
+
+      - name: Who am I (needs no permissions)
+        run: aws sts get-caller-identity
+
+      - name: Least privilege check (must be denied)
+        run: |
+          if aws s3 ls >/dev/null 2>&1; then
+            echo "::error::smoke role can list S3 buckets; it should have no permissions"; exit 1
+          fi
+          echo "Denied as expected: the role has no permissions."

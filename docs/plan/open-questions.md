@@ -1,0 +1,18 @@
+# Open questions and decisions
+
+Answers received 2026-10-06 are marked **Resolved**. Unanswered items keep their recommended default until changed.
+
+| # | Question | Decision | Status |
+|---|---|---|---|
+| Q1 | AWS region | **`ap-southeast-2` (Sydney)** | Resolved |
+| Q2 | AWS account plan | **Free plan, more than $140 credits, about 6 months left.** EKS is paid for from credits and kept to a minimum. If the Free plan blocks EKS, upgrade to the Paid plan; remaining credits still apply (verify in the Billing console) | Resolved (verify EKS access in setup step 4.4) |
+| Q3 | Budget alarm | **$25/month** (≈ credits ÷ 6 months), alerts at 50/80/100 % actual + 100 % forecast. The cluster is torn down whenever not in use | Resolved |
+| Q4 | Separation of duties | **Lenient demo mode:** one GitHub account; PRs need 0 approvals; the `production` environment lists you as reviewer *without* "prevent self-review". Every decision record carries `sod_check: "waived:solo-demo"` so the gap is visible, not hidden. Tighten via one ruleset change when a second person joins | Resolved |
+| Q5 | Spec approval in auto mode | **Yes:** `risk:low` + `spec:auto` tickets defer spec approval to PR time; the `spec-approved` check is *advisory* (not required) in demo mode | Resolved (lenient) |
+| Q6 | Repo visibility | **Public** GitHub repo `idp-platform` | Resolved |
+| Q7 | Pact broker | Self-hosted in-cluster (default) | Default |
+| Q8 | Jira | **Site `suyashkunte.atlassian.net`, project key `IDP`** (free plan; renamed from SCRUM on 2026-10-06; Atlassian now calls projects "spaces": space "Intelligent Delivery Pipeline"). "Components" are modelled as `component:*` labels to stay compatible with team-managed projects | Resolved |
+| Q9 | Domain name | No domain for now: ALB hostname over HTTP, path-based routing per environment. Revisit before DAST hardening (iteration 5) | Default |
+| Q10 | Anthropic API key for the advisory PR review in CI | Optional; skipped until provided | Default |
+| Q11 | Who installs the toolchain | You run the steps in [../setup/iteration-0-setup.md](../setup/iteration-0-setup.md); I verify with `tools/doctor.sh` | Resolved |
+| Q12 | **AWS account restrictions (found 2026-10-06).** The account was created with *Sign up for AWS (new)*: Free plan, $139.88 credits, plan expires 2027-04-01, placed in an AWS-managed Organization (`o-58u6ldre2q`). An SCP explicitly **denies IAM identity-provider APIs** (`iam:*OpenIDConnectProvider*`, SAML), which blocks GitHub Actions → AWS OIDC (keyless CI) and EKS IRSA. AWS docs: identity-provider management, fine-grained permissions and Organizations features need **"advanced AWS features"**, which requires the **Paid plan** (free to activate, no migration; remaining credits keep applying to bills; upgrade can't be reversed). Options: **(A)** upgrade to Paid + activate advanced features + spend limit/budget (keeps the keyless design); **(B)** stay Free and run CI jobs that touch AWS on CodeBuild-hosted GitHub Actions runners (no OIDC provider; availability on the Free plan unverified); **(C)** static IAM access keys in GitHub secrets (rejected: violates the no-long-lived-credentials principle) | **A chosen and done 2026-10-07:** Paid plan + advanced features. Organisation `o-58u6ldre2q` (team `idp-platform`) is now ours: management `324072340710` (billing, org-wide budget; profile `idp-mgmt`), **workload `736162637380`** (all IDP resources; profile `idp`), identity delegated admin `996601532068` (AWS-managed). Root SCPs: workloads only in ap-southeast-2 (global services exempt); `/managed/` roles protected; spend-limit SCP auto-attaches if a spend limit is hit. Credits apply at org level | Resolved |
