@@ -163,7 +163,8 @@ data "aws_iam_policy_document" "oidc_smoke_trust" {
     condition {
       test     = "StringLike"
       variable = "${local.github_oidc}:sub"
-      values   = ["repo:${var.github_owner}/${var.platform_repo}:*"]
+      # GitHub immutable subject: names plus numeric IDs, so a deleted-and-recreated repo or renamed owner can't reuse the role.
+      values = ["repo:${var.github_owner}@${var.github_owner_id}/${var.platform_repo}@${var.platform_repo_id}:*"]
     }
   }
 }

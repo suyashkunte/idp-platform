@@ -16,6 +16,18 @@ variable "platform_repo" {
   default     = "idp-platform"
 }
 
+variable "github_owner_id" {
+  description = "Numeric GitHub owner ID (immutable OIDC subject). gh api users/<owner> --jq .id"
+  type        = string
+  default     = "9319802"
+}
+
+variable "platform_repo_id" {
+  description = "Numeric GitHub repo ID (immutable OIDC subject). gh api repos/<owner>/<repo> --jq .id"
+  type        = string
+  default     = "1407798795"
+}
+
 variable "monthly_budget_usd" {
   description = "Monthly cost budget (USD, before credits)."
   type        = string

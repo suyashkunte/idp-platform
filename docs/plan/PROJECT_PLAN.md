@@ -328,7 +328,7 @@ platform tags protected (only `platform-release.yml` creates `v*`); environments
 AWS OIDC trust scoped per repo + environment by `service-onboarding`.
 
 ## 11. Security model (summary)
-No static cloud credentials anywhere · per-tenant, per-gate IAM roles · images admissible only if signed by the platform's G0 workflow
+No static cloud credentials anywhere · per-tenant, per-gate IAM roles · OIDC trust policies match GitHub's **immutable subject** (`repo:<owner>@<owner_id>/<repo>@<repo_id>:…`), so a deleted-and-recreated repo or renamed owner can't reuse a role; `idp onboard` resolves the IDs · images admissible only if signed by the platform's G0 workflow
 and carrying G3/G4 attestations · tenants can tighten policy, never loosen it · Actions pinned by SHA · agent guardrails from the plugin +
 rulesets · threat model in iteration 3 (`docs/architecture/threat-model.md`), extended with tenant-isolation threats (cross-tenant
 namespace access, role confusion, evidence spoofing between tenants).
