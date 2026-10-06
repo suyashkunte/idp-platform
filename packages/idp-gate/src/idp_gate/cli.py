@@ -15,7 +15,10 @@ def _cmd_spec_trace(args: argparse.Namespace) -> int:
     try:
         report = spec_trace.trace(args.ticket, Path(args.root))
     except FileNotFoundError as exc:
-        print(f"spec-trace: {exc}", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"ticket": args.ticket, "ok": False, "error": str(exc)}))
+        else:
+            print(f"spec-trace: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(spec_trace.to_dict(report)) if args.json else spec_trace.render(report))
     return 0 if report.ok else 1
