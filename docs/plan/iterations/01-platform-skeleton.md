@@ -23,7 +23,7 @@ above. That is the shell bypass the plugin's `guard_bash.py` blocks once the plu
 active in that session). The human reviews those files in the PR, and places the CI workflow from the prepared copy.
 
 ## Next steps (resume here)
-1. Human copies the prepared workflow to `.github/workflows/platform-ci.yml` (a copy is in the session scratchpad; if lost,
+1. Human copies the prepared workflow to `.github/workflows/platform-ci.yml` (copy of the proposal: `docs/plan/iterations/platform-ci.yml.proposed`; if lost,
    regenerate it from this spec: checkout@v7.0.1, setup-uv@v10.2.0, `make verify`, pre-commit, `claude plugin validate
    --strict`, upload reports; job id `verify`; actions pinned by SHA).
 2. Commit, push the branch, open the PR (do not merge). Watch `platform-ci / verify`.
