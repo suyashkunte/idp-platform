@@ -69,6 +69,34 @@ spec:
 | `make test-smoke` / `test-api` / `test-e2e` / `test-perf` | when `tests.*: true` | run against `BASE_URL`; write JUnit + `summary.json` into `REPORTS_DIR` |
 | `make sbom` / `make sca` | no | the build profile provides defaults |
 
+### How `idp validate` checks it
+- `idp validate` with no argument validates `./idp.yaml`; `idp validate path/to/file.yaml` validates that file. The
+  Makefile checked is always `Makefile` in the same directory as the validated file (`makefile` and `GNUmakefile` are not
+  recognised).
+- Checks, in this order: the `idp-service.v1` schema, then the Make contract: every target marked "yes" above
+  (`lint`, `test`, `test-component`, `verify`, `spec-trace`), then `test-<kind>` for each of `smoke`, `api`, `e2e`,
+  `perf` whose `spec.tests.<kind>` is `true`. Recommended targets (`verify-fast`, `format`) are not checked. Every missing
+  target is reported, not only the first. A missing Makefile is reported as a single `Makefile not found` violation.
+  Make checks also run when the schema check fails, but are skipped if the YAML cannot be parsed into a mapping.
+- Targets are found by **static parsing**; `make` is never executed. A target counts when a line at column 0 names it
+  before `:` or `::` (not `:=`, `::=`, `:::=`); comments after `#` are ignored. Not counted: names listed only in
+  `.PHONY:` or other special targets starting with `.`, pattern rules (`%`), names containing `$(...)`, variable
+  assignments, recipe (tab-indented) and indented lines. `include`, `-include` and `sinclude` are followed recursively for
+  literal paths relative to the Makefile's directory; words with `$` or glob characters and files not on disk are
+  skipped. Limitations: `define`/`endef` bodies, conditionals (targets in either branch count), line continuations in
+  rule lines and variable expansion are not interpreted, so define required targets as plain rules.
+- Text output: `<file>: valid (idp-service.v1.json)`, or one line per violation, e.g.
+  `idp.yaml: Makefile: missing required target 'lint'`.
+- `--json` prints exactly one JSON line with keys `file`, `valid`, `schema`, `violations` (each `{path, message}`;
+  schema violations use the dotted field path, Make violations use `Makefile`):
+
+```json
+{"file": "idp.yaml", "valid": false, "schema": "idp-service.v1", "violations": [{"path": "Makefile", "message": "missing required target 'test-component'"}]}
+```
+
+- Exit codes: `0` valid, `1` violations found, `2` file not found or usage error (nothing on stdout, message on stderr,
+  also with `--json`).
+
 ## Evidence formats (I3)
 JUnit XML · Cobertura XML · SARIF 2.1 · CycloneDX JSON · `summary.json` (`test-summary.v1`: totals, pass rate by tag, failed tests with
 `trace_id`). Tags are `p0`, `p1`, `critical`, `smoke`, `quarantine`, plus `ac:<KEY>:AC-n` for traceability. Non-Python stacks emit tags in test names

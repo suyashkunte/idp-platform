@@ -14,6 +14,8 @@ versions follow [Semantic Versioning](https://semver.org/).
 - IDP-13: `idp spec-trace <KEY> --json` machine-readable traceability output (one JSON line with `ticket`, `ok`,
   `required`, `missing`, `unknown`, `tests`; missing spec prints an `error` object, exit 1) and `spec_trace.to_dict()`.
   Text output unchanged.
+- IDP-17: `idp validate` checks the Make contract (required targets, `test-<kind>` for enabled `spec.tests`) and adds
+  `--json`; validates `./idp.yaml` by default.
 
 ### Changed
 - IDP-12: pin GitHub Actions runners to `ubuntu-24.04`; a test fails on any other `runs-on`.
