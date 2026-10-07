@@ -47,6 +47,7 @@ that instant. It must be confirmed once by a real run (T4), because tests never 
 ### hatch_build.py (sketch)
 ```python
 """idp-gate build hook: ship allow-listed build profiles in the sdist and the wheel (IDP-21, ADR-0012)."""
+
 from pathlib import Path
 from typing import Any
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
@@ -55,16 +56,20 @@ ALLOWED_SUFFIXES = frozenset({".yaml", ".mk", ".md"})
 SDIST_DIR = "build-profiles"
 WHEEL_DIR = "idp_gate/build_profiles"
 
+
 def profiles_source(project_root: Path) -> Path:
     """`<root>/build-profiles` inside an unpacked sdist, else the checkout's `<root>/../../build-profiles`."""
     candidates = [project_root / SDIST_DIR, project_root.parent.parent / SDIST_DIR]
     for c in candidates:
-        if c.is_dir(): return c
+        if c.is_dir():
+            return c
     raise RuntimeError(f"idp-gate build: build profiles not found (looked in: {', '.join(map(str, candidates))})")
+
 
 def select_profile_files(source: Path) -> list[Path]:
     """Sorted relative paths of regular, non-symlink *.yaml/*.mk/*.md files without dot-prefixed components."""
     ...  # rglob("*"); skip symlinks, non-files, dot components, other suffixes; raise if no */profile.yaml selected
+
 
 class ProfilesBuildHook(BuildHookInterface):  # subscript if hatchling's class is generic
     def initialize(self, version: str, build_data: dict[str, Any]) -> None:
