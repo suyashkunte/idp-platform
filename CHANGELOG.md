@@ -24,6 +24,10 @@ versions follow [Semantic Versioning](https://semver.org/).
   `agent-notes.md` with pytest idioms, AC tagging and fixture conventions, referenced by the unit-test-generator agent).
   Schema `build-profile.v1` shipped in `idp-gate` (profiles included in the wheel) and `idp profile show <name> [--json]`
   (resolved profile plus `dir`; exit 2 with the profile name and reason on stderr).
+- IDP-19: `examples/minimal-service` conformance fixture (stdlib health endpoints, `idp.yaml`, python-uv profile
+  defaults; no `pyproject.toml`, not a workspace member) and `idp conformance [DIR]` (default `examples`: runs
+  `idp validate` and `make verify` for each example with an `idp.yaml`, one PASS/FAIL line each plus a summary; exit 0
+  all passed, 1 any failed, 2 refused). Root `make conformance`, run by `make verify`.
 
 ### Changed
 - IDP-12: pin GitHub Actions runners to `ubuntu-24.04`; a test fails on any other `runs-on`.
