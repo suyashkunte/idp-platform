@@ -14,10 +14,25 @@ PROFILE_SCHEMA_ID = "build-profile.v1"
 PROFILE_SCHEMA_NAME = f"{PROFILE_SCHEMA_ID}.json"
 PROFILE_FILE = "profile.yaml"
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+_CHECKOUT_MARKER = ("packages", "idp-gate", "pyproject.toml")
+
+
+def _checkout_dir(module_file: Path) -> Path | None:
+    """`<repo>/build-profiles` when `module_file` is `<repo>/packages/idp-gate/src/idp_gate/<module>.py`, else None.
+
+    Only this repository's own source tree qualifies (editable workspace install); shallow layouts
+    (`pip install --target`) and site-packages never pick up an unrelated `build-profiles/` four levels up."""
+    parents = module_file.parents
+    if len(parents) < 5:
+        return None
+    repo = parents[4]
+    return repo / "build-profiles" if repo.joinpath(*_CHECKOUT_MARKER).is_file() else None
+
+
 # Installed wheel: profiles are force-included next to the package (see packages/idp-gate/pyproject.toml).
 _PACKAGED_DIR = Path(__file__).resolve().parent / "build_profiles"
 # Editable workspace install: `idp_gate` is imported from packages/idp-gate/src/, so use the repo checkout.
-_CHECKOUT_DIR = Path(__file__).resolve().parents[4] / "build-profiles"
+_CHECKOUT_DIR: Path | None = _checkout_dir(Path(__file__).resolve())
 
 
 class ProfileError(Exception):
@@ -30,7 +45,7 @@ class ProfileError(Exception):
 
 def profiles_root() -> Path:
     """The first existing profiles directory: packaged, then checkout (roots are not merged)."""
-    candidates = (_PACKAGED_DIR, _CHECKOUT_DIR)
+    candidates = [c for c in (_PACKAGED_DIR, _CHECKOUT_DIR) if c is not None]
     for candidate in candidates:
         if candidate.is_dir():
             return candidate

@@ -389,6 +389,39 @@ def test_packaged_profiles_take_precedence_over_checkout(tmp_path: Path, monkeyp
 
 
 @pytest.mark.ac("IDP-18:AC-4")
+def test_checkout_candidate_absent_in_shallow_layout() -> None:
+    profiles = _profiles()
+    assert profiles._checkout_dir(Path("/app/idp_gate/profiles.py")) is None  # pip install --target /app
+
+
+@pytest.mark.ac("IDP-18:AC-4")
+def test_checkout_candidate_requires_this_repo_source_tree(tmp_path: Path) -> None:
+    profiles = _profiles()
+    module = tmp_path / "packages" / "idp-gate" / "src" / "idp_gate" / "profiles.py"
+    (tmp_path / "build-profiles").mkdir()
+    assert profiles._checkout_dir(module) is None  # unrelated build-profiles/ four levels up is ignored
+    (tmp_path / "packages" / "idp-gate").mkdir(parents=True)
+    (tmp_path / "packages" / "idp-gate" / "pyproject.toml").write_text("[project]\n")
+    assert profiles._checkout_dir(module) == tmp_path / "build-profiles"
+    venv_module = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages" / "idp_gate" / "profiles.py"
+    assert profiles._checkout_dir(venv_module) is None
+
+
+@pytest.mark.ac("IDP-18:AC-5")
+def test_no_checkout_candidate_lists_only_real_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    profiles = _profiles()
+    packaged = tmp_path.resolve() / "no-packaged"
+    monkeypatch.setattr(profiles, "_PACKAGED_DIR", packaged)
+    monkeypatch.setattr(profiles, "_CHECKOUT_DIR", None)
+    assert _run(["profile", "show", "python-uv"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"profile show: no build profiles found (looked in: {packaged})\n"
+
+
+@pytest.mark.ac("IDP-18:AC-4")
 def test_wheel_config_force_includes_build_profiles() -> None:
     config = tomllib.loads(PACKAGE_PYPROJECT.read_text(encoding="utf-8"))
     wheel = config.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
