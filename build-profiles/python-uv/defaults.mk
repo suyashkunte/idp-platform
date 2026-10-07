@@ -1,12 +1,19 @@
 # Build profile python-uv: default Make targets (ADR-0012, IDP-18). Use: include $(IDP_PROFILE_DIR)/defaults.mk
 # A target the tenant does not define (sbom, sca) runs idp-default-<target>; defining it yourself overrides the
 # default without warnings. Caveats: listing sbom/sca in .PHONY without a recipe, or your own `%:` rule, bypasses the
-# fallback. Reserved names: idp-default-*, _idp_saved_goal. No commands run at parse time.
+# fallback. Reserved names: idp-default-*, _idp_*. No commands run at parse time.
 _idp_saved_goal := $(.DEFAULT_GOAL)
 UV ?= uv
 REPORTS_DIR ?= reports
-IDP_SBOM_CMD ?= $(UV) run --with cyclonedx-bom cyclonedx-py environment --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json
-IDP_SCA_CMD ?= $(UV) run --with pip-audit pip-audit --format json --output $(REPORTS_DIR)/sca.json
+# Tools are pinned (override the *_SPEC variables to upgrade) and run in uv's isolated tool environments. Both scan
+# the project's locked dependencies, exported with hashes from uv.lock using --frozen, so uv.lock and the project
+# environment are not changed. Network is needed only when the recipes run (tool download, vulnerability database).
+IDP_CYCLONEDX_SPEC ?= cyclonedx-bom==7.5.0
+IDP_PIP_AUDIT_SPEC ?= pip-audit==2.10.1
+IDP_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.locked.txt
+IDP_EXPORT_CMD ?= $(UV) export --quiet --frozen --all-packages --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_REQUIREMENTS)
+IDP_SBOM_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_REQUIREMENTS)
+IDP_SCA_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_PIP_AUDIT_SPEC) pip-audit --disable-pip --requirement $(IDP_REQUIREMENTS) --format json --output $(REPORTS_DIR)/sca.json
 
 .PHONY: idp-default-sbom idp-default-sca
 # An empty command fails (fail closed) instead of silently producing no evidence.

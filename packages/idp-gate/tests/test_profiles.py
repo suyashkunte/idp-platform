@@ -268,13 +268,36 @@ def test_failing_default_command_fails_the_target(tmp_path: Path, target: str, v
 @pytest.mark.ac("IDP-18:AC-2")
 def test_default_commands_use_profile_tools_in_dry_run(tmp_path: Path) -> None:
     _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    export = (
+        "/nonexistent/uv export --quiet --frozen --all-packages --no-emit-project --no-emit-workspace "
+        "--format requirements-txt --output-file reports/requirements.locked.txt"
+    )
     sca = _make(tmp_path, "-n", "sca", "UV=/nonexistent/uv", stub=False)
     assert (sca.returncode, sca.stderr) == (0, "")
-    assert "/nonexistent/uv run --with pip-audit pip-audit" in sca.stdout
+    assert (
+        f"{export} && /nonexistent/uv tool run --from pip-audit==2.10.1 pip-audit --disable-pip "
+        "--requirement reports/requirements.locked.txt --format json --output reports/sca.json"
+    ) in sca.stdout.splitlines()
     sbom = _make(tmp_path, "-n", "sbom", "UV=/nonexistent/uv", stub=False)
     assert (sbom.returncode, sbom.stderr) == (0, "")
-    assert "/nonexistent/uv run --with cyclonedx-bom cyclonedx-py" in sbom.stdout
+    assert (
+        f"{export} && /nonexistent/uv tool run --from cyclonedx-bom==7.5.0 cyclonedx-py requirements "
+        "--output-format JSON --output-file reports/sbom.cdx.json reports/requirements.locked.txt"
+    ) in sbom.stdout.splitlines()
     assert not (tmp_path / "reports").exists()  # dry run executes nothing
+
+
+@pytest.mark.ac("IDP-18:AC-2")
+def test_tool_pins_are_overridable(tmp_path: Path) -> None:
+    _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    sca = _make(tmp_path, "-n", "sca", "IDP_PIP_AUDIT_SPEC=pip-audit==9.9.9", stub=False)
+    assert (sca.returncode, sca.stderr) == (0, "")
+    assert "uv tool run --from pip-audit==9.9.9 pip-audit " in sca.stdout
+    assert "pip-audit==2.10.1" not in sca.stdout
+    sbom = _make(tmp_path, "-n", "sbom", "IDP_CYCLONEDX_SPEC=cyclonedx-bom==9.9.9", stub=False)
+    assert (sbom.returncode, sbom.stderr) == (0, "")
+    assert "uv tool run --from cyclonedx-bom==9.9.9 cyclonedx-py requirements " in sbom.stdout
+    assert "cyclonedx-bom==7.5.0" not in sbom.stdout
 
 
 @pytest.mark.ac("IDP-18:AC-2")
