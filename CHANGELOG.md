@@ -31,3 +31,9 @@ versions follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - IDP-12: pin GitHub Actions runners to `ubuntu-24.04`; a test fails on any other `runs-on`.
+- IDP-21: python-uv `sbom`/`sca` defaults pass `--exclude-newer $(IDP_TOOLS_EXCLUDE_NEWER)` to `uv tool run`
+  (default `2026-10-06T00:00:00Z`, overridable; empty fails closed), so the pinned tools' transitive dependencies
+  resolve reproducibly. `idp-gate` packages profiles through a hatch build hook (`packages/idp-gate/hatch_build.py`)
+  instead of a static `force-include`: only regular, non-symlink `*.yaml`/`*.mk`/`*.md` files without dot-prefixed
+  path parts ship, the sdist carries them under `build-profiles/`, and a wheel built from the sdist includes the same
+  profiles as a direct wheel build.

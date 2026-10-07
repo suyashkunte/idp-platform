@@ -28,8 +28,8 @@ Status stays Proposed; acceptance is a human decision (IDP-18 spec, Q5).
 
 ### Discovery
 - Profiles are resolved from the first existing root, never merged:
-  1. packaged: `idp_gate/build_profiles/` inside the installed `idp-gate` wheel (hatch `force-include` of
-     `build-profiles/`);
+  1. packaged: `idp_gate/build_profiles/` inside the installed `idp-gate` wheel (allow-listed copy of
+     `build-profiles/`, added by a hatch build hook since IDP-21; see below);
   2. checkout: `<repo>/build-profiles/`, used only for the editable workspace install, and only when the module sits in
      this repository's own source tree (`<repo>/packages/idp-gate/pyproject.toml` exists). Any other layout yields no
      checkout candidate, so an unrelated `build-profiles/` directory is never picked up.
@@ -37,7 +37,6 @@ Status stays Proposed; acceptance is a human decision (IDP-18 spec, Q5).
 - **Invariant:** profiles come only from the trusted packaged root or the guarded checkout root. They are never loaded
   from tenant-supplied paths (no path argument, no environment variable, no lookup relative to the tenant repo).
   Changing this would make tenant input part of the trusted toolchain and needs a new decision.
-- Caveat: a wheel built from an sdist would not contain `build-profiles/`; build wheels from the source tree.
 
 ### Default Make targets (`%: idp-default-%`)
 - `defaults.mk` never defines `sbom`/`sca` explicitly. It defines phony `idp-default-sbom`/`idp-default-sca` rules and
@@ -71,3 +70,39 @@ Status stays Proposed; acceptance is a human decision (IDP-18 spec, Q5).
   becomes report-only and the gate decides, with severity thresholds and expiring waivers.
 - SCA covers the CI platform only (Linux/CPython, matching the deploy target): dependencies that are conditional on
   other platforms (environment markers such as `sys_platform == 'win32'`) are not audited.
+
+## Implementation notes (IDP-21)
+Status stays Proposed (IDP-21 spec, Q6).
+
+### Reproducible tool resolution
+- The `*_SPEC` pins fix only the top-level tools. To freeze their transitive dependencies too, the python-uv
+  [`defaults.mk`](../../build-profiles/python-uv/defaults.mk) passes `--exclude-newer $(IDP_TOOLS_EXCLUDE_NEWER)` to
+  both `uv tool run` invocations (before `--from`, because uv reads options only before the command). `uv export` does
+  not get the option: it reads the existing uv.lock and resolves nothing.
+- `IDP_TOOLS_EXCLUDE_NEWER ?= 2026-10-06T00:00:00Z`: a fixed RFC 3339 UTC instant (the IDP-18 pin date), never
+  relative or computed. A bare date is avoided because uv reads it in the local time zone, which would make resolution
+  differ between a laptop and CI. Tenants can override it like any other profile variable; the explicit flag also
+  takes precedence over a `UV_EXCLUDE_NEWER` environment variable.
+- Fail closed: an empty (or whitespace-only) value stops `idp-default-sbom`/`idp-default-sca` with
+  `IDP_TOOLS_EXCLUDE_NEWER is empty: ...` before anything runs. The guard is a recipe line, so parse time stays
+  command-free and unrelated targets are unaffected. It applies even when `IDP_SBOM_CMD`/`IDP_SCA_CMD` is overridden;
+  a tenant-defined `sbom`/`sca` target never runs it. The value's format is not checked by make; uv rejects a
+  malformed value when the recipe runs.
+- Bumping a `*_SPEC` pin requires moving `IDP_TOOLS_EXCLUDE_NEWER` forward in the same change; otherwise a pin
+  released after that instant cannot resolve.
+
+### Packaging via a build hook
+- The static wheel `force-include` of `../../build-profiles` is replaced by a hatch custom build hook,
+  [`packages/idp-gate/hatch_build.py`](../../packages/idp-gate/hatch_build.py) (`[tool.hatch.build.hooks.custom]`).
+  Why: hatchling does not apply `exclude` patterns to force-included paths, so a static mapping cannot filter, and a
+  static wheel mapping points at a path that does not exist next to an unpacked sdist.
+- Allow-list: only regular, non-symlink files with suffix `.yaml`, `.mk` or `.md` and no dot-prefixed path component
+  are packaged; everything else (`notes.txt`, `.env`, `.hidden.md`, `__pycache__/`) is left out silently.
+- Targets: the sdist carries the profiles at `build-profiles/` in its root, the wheel at `idp_gate/build_profiles/`.
+  The hook uses `<root>/build-profiles` first; inside an unpacked sdist (`PKG-INFO` present) it uses only that copy and
+  never looks outside the sdist, otherwise it falls back to the checkout's `<root>/../../build-profiles`. A direct wheel
+  build and a wheel built from the sdist therefore contain the same files with identical bytes.
+- Fail closed: the build stops with an error when no profiles source exists, when no `*/profile.yaml` is selected, or
+  for an unknown build target, instead of producing a wheel without profiles.
+- Install layout and discovery (above) are unchanged. `hatchling` is in idp-gate's dev dependency group only, so mypy
+  strict checks the hook against real types; runtime dependencies are unchanged.
