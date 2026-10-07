@@ -845,6 +845,18 @@ def test_profile_file_selection_does_not_follow_symlinked_directories(tmp_path: 
     assert hook.select_profile_files(source) == [Path("python-uv/defaults.mk"), Path("python-uv/profile.yaml")]
 
 
+@pytest.mark.ac("IDP-24:AC-4")
+def test_profiles_source_accepts_checkout_behind_symlinked_ancestor(tmp_path: Path) -> None:
+    """Only the candidate itself must not be a symlink; a symlinked ancestor (macOS /tmp, spec A7) is fine."""
+    hook = _hatch_build()
+    real = tmp_path / "real"
+    _files(real / "build-profiles", ["python-uv/profile.yaml"])
+    (real / "packages" / "idp-gate").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    assert hook.profiles_source(alias / "packages" / "idp-gate") == alias / "build-profiles"
+
+
 _SYMLINK_MESSAGE = "idp-gate build: build profiles source is a symlink, refusing to follow it: "
 
 
@@ -1166,6 +1178,7 @@ def _constraints() -> _Pins:
         name, sep, version = requirement.partition("==")
         assert sep == "==", f"not an exact pin in build-constraints.txt: {requirement}"
         hashes = frozenset(o.removeprefix("--hash=") for o in options if o.startswith("--hash="))
+        assert _normalize(name) not in pins, f"duplicate entry in build-constraints.txt: {_normalize(name)}"
         pins[_normalize(name)] = (version.split(";", 1)[0], hashes)
     return pins
 
@@ -1221,19 +1234,26 @@ def test_uv_build_env_strips_uv_and_pip_variables(monkeypatch: pytest.MonkeyPatc
         "UV_EXCLUDE_NEWER": "2020-01-01T00:00:00Z",
         "PIP_CONSTRAINT": "/nonexistent/constraints.txt",
     }
+    for name in [n for n in os.environ if n.startswith(("UV_", "PIP_"))]:  # e.g. set by `uv run`
+        monkeypatch.delenv(name)
     for name, value in stripped.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("UV_CACHE_DIR", "/nonexistent/uv-cache")
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", "/nonexistent/uv-python")
     monkeypatch.setenv("IDP24_UNRELATED", "kept")
-    env = _uv_build_env(dict(os.environ))
+    base = dict(os.environ)
+    env = _uv_build_env(base)
     assert sorted(set(stripped) & set(env)) == []
     assert env["UV_CACHE_DIR"] == "/nonexistent/uv-cache"
+    assert env["UV_PYTHON_INSTALL_DIR"] == "/nonexistent/uv-python"
     assert env["IDP24_UNRELATED"] == "kept"
     assert env["PATH"] == os.environ["PATH"]
-    clean = {k: v for k, v in os.environ.items() if k in _UV_ENV_KEEP or not k.startswith(("UV_", "PIP_"))}
-    polluted_env, clean_env = _uv_build_env(dict(os.environ) | _POLLUTED_ENV), _uv_build_env(clean)
+    # expected result derived from the names this test set, not from _uv_build_env's predicate
+    clean = {k: v for k, v in base.items() if k not in stripped}
+    polluted_env = _uv_build_env(base | _POLLUTED_ENV)
     # compare by name only, so a failing assertion never prints environment values
-    assert sorted(n for n in polluted_env.keys() | clean_env.keys() if polluted_env.get(n) != clean_env.get(n)) == []
+    assert sorted(n for n in env.keys() | clean.keys() if env.get(n) != clean.get(n)) == []
+    assert sorted(n for n in polluted_env.keys() | clean.keys() if polluted_env.get(n) != clean.get(n)) == []
 
 
 @pytest.mark.ac("IDP-24:AC-2")
