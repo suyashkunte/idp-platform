@@ -16,7 +16,8 @@ versions follow [Semantic Versioning](https://semver.org/).
   Text output unchanged.
 - IDP-17: `idp validate` checks the Make contract (required targets, `test-<kind>` for enabled `spec.tests`) and adds
   `--json` (still defaults to `./idp.yaml`). Makefile reads are confined to the service directory and capped
-  (1 MiB per file, 64 files).
+  (1 MiB per file, 64 files, 1024 include words, 20 include problems). Includes outside the service directory
+  (e.g. a shared `../common.mk`) are rejected, even with `-include`.
 
 ### Changed
 - IDP-12: pin GitHub Actions runners to `ubuntu-24.04`; a test fails on any other `runs-on`.
