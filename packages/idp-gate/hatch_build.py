@@ -17,11 +17,16 @@ def profiles_source(project_root: Path) -> Path:
     """`<root>/build-profiles` first, then the checkout's `<root>/../../build-profiles`.
 
     Inside an unpacked sdist (`<root>/PKG-INFO` exists) only the sdist copy counts: never look outside the sdist.
+    A symlinked candidate fails closed, with no fallback to the next candidate (IDP-24).
     """
     candidates = [project_root / SDIST_DIR]
     if not (project_root / "PKG-INFO").is_file():
         candidates.append(project_root.parent.parent / SDIST_DIR)
     for candidate in candidates:
+        if candidate.is_symlink():
+            raise RuntimeError(
+                f"idp-gate build: build profiles source is a symlink, refusing to follow it: {candidate}"
+            )
         if candidate.is_dir():
             return candidate
     looked_in = ", ".join(map(str, candidates))
