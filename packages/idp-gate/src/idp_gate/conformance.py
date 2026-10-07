@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
-import subprocess  # nosec B404 - only a fixed make invocation, no shell
+import signal
+import subprocess  # nosec B404 - list-form argv for make (no shell); see _run_make_verify for the trust assumption
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,24 +43,37 @@ def _make_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in _MAKE_ENV_STRIPPED}
 
 
+def _tail(output: str) -> tuple[str, ...]:
+    return tuple(output.splitlines()[-OUTPUT_TAIL_LINES:])
+
+
 def _run_make_verify(directory: Path, make: str, profile_dir: str) -> Result:
     argv = [make, "--no-print-directory", "-C", str(directory), "verify", f"IDP_PROFILE_DIR={profile_dir}"]
     try:
-        # Fixed argv (no shell); `make` is an absolute path from shutil.which.
-        out = subprocess.run(  # noqa: S603  # nosec B603
+        # List-form argv, no shell for argv; `make` is an absolute path from shutil.which. make itself runs the
+        # example's recipes via /bin/sh: examples/ is platform-owned (reviewed like code), not tenant-contributed.
+        # New session so a timeout can kill the whole process group (make and any recipe children, e.g. a server).
+        proc = subprocess.Popen(  # noqa: S603  # nosec B603
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             env=_make_env(),
-            timeout=MAKE_TIMEOUT_S,
-            check=False,
+            start_new_session=True,
         )
+    except OSError as exc:
+        return Result(directory, ok=False, reason=f"make verify could not run: {exc}")
+    try:
+        output, _ = proc.communicate(timeout=MAKE_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return Result(directory, ok=False, reason=f"make verify timed out after {MAKE_TIMEOUT_S} s")
-    if out.returncode != 0:
-        tail = tuple(out.stdout.splitlines()[-OUTPUT_TAIL_LINES:])
-        return Result(directory, ok=False, reason=f"make verify exited {out.returncode}", details=tail)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        output, _ = proc.communicate()
+        reason = f"make verify timed out after {MAKE_TIMEOUT_S} s"
+        return Result(directory, ok=False, reason=reason, details=_tail(output or ""))
+    if proc.returncode != 0:
+        return Result(directory, ok=False, reason=f"make verify exited {proc.returncode}", details=_tail(output))
     return Result(directory, ok=True)
 
 

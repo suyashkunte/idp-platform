@@ -1,8 +1,11 @@
 """IDP-19: `idp conformance [DIR]` runs `idp validate` and `make verify` for every example with an `idp.yaml`."""
 
 import importlib
+import os
 import shutil
+import signal
 import subprocess
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -13,6 +16,7 @@ import yaml
 from idp_gate.cli import main
 
 REQUIRED_TARGETS = ("lint", "test", "test-component", "verify", "spec-trace")
+STRIPPED_MAKE_VARS = ("MAKEFLAGS", "GNUMAKEFLAGS", "MAKELEVEL", "MFLAGS", "MAKEFILES")
 
 needs_make = pytest.mark.skipif(shutil.which("make") is None, reason="make is not on PATH")
 
@@ -144,12 +148,26 @@ def test_conformance_reports_make_timeout(
     conformance = _conformance()
     _write_example(tmp_path / "examples", "slow")
     calls: list[tuple[list[str], dict[str, Any]]] = []
+    timeouts: list[float | None] = []
+    killed: list[tuple[int, int]] = []
 
-    def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append((list(argv), kwargs))
-        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 0))
+    class FakePopen:
+        pid = 424242
+        returncode = -9
 
-    monkeypatch.setattr(conformance.subprocess, "run", fake_run)
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            calls.append((list(argv), kwargs))
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, None]:
+            timeouts.append(timeout)
+            if len(timeouts) == 1:
+                raise subprocess.TimeoutExpired("make", timeout or 0)
+            return "", None
+
+    monkeypatch.setattr(conformance.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(conformance.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    for name in STRIPPED_MAKE_VARS:
+        monkeypatch.setenv(name, "x")
     monkeypatch.chdir(tmp_path)
 
     code = _run(["conformance", "examples"])
@@ -163,8 +181,62 @@ def test_conformance_reports_make_timeout(
     assert argv[1:5] == ["--no-print-directory", "-C", "examples/slow", "verify"]
     assert argv[5].startswith("IDP_PROFILE_DIR=")
     assert argv[5].endswith("python-uv")
-    assert kwargs["timeout"] == 60
+    assert kwargs["start_new_session"] is True
+    assert [name for name in STRIPPED_MAKE_VARS if name in kwargs["env"]] == []
+    assert timeouts == [60, None]
+    assert killed == [(FakePopen.pid, signal.SIGKILL)]
     assert conformance.MAKE_TIMEOUT_S == 60
+
+
+def _wait_until_gone(pid: int, deadline_s: float = 5.0) -> bool:
+    """Poll (bounded) until `pid` no longer exists; a killed child may briefly linger until it is reaped."""
+    end = time.monotonic() + deadline_s
+    while time.monotonic() < end:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.01)
+    return False
+
+
+@needs_make
+@pytest.mark.ac("IDP-19:AC-2")
+def test_conformance_timeout_kills_recipe_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    conformance = _conformance()
+    # The child does not hold make's output pipe, so only a process-group kill (not killing make alone) stops it.
+    verify = "@echo $$$$ > child.pid; exec sleep 30 >/dev/null 2>&1"
+    directory = _write_example(tmp_path / "examples", "hang", verify=verify)
+    monkeypatch.setattr(conformance, "MAKE_TIMEOUT_S", 1)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "FAIL examples/hang: make verify timed out after 1 s"
+    assert lines[-1] == "conformance: 0 passed, 1 failed"
+    assert code == 1
+    pid = int((directory / "child.pid").read_text())
+    assert _wait_until_gone(pid), f"recipe child {pid} survived the timeout"
+
+
+@needs_make
+@pytest.mark.ac("IDP-19:AC-2")
+def test_conformance_reports_non_utf8_output_as_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_example(tmp_path / "examples", "binary", verify="@printf 'bad-\\377\\n'; exit 1")
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "FAIL examples/binary: make verify exited 2"
+    assert "    bad-\ufffd" in lines
+    assert lines[-1] == "conformance: 0 passed, 1 failed"
+    assert code == 1
 
 
 @needs_make

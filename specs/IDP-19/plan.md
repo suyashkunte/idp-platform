@@ -12,7 +12,8 @@ docs and a CHANGELOG entry. The root `Makefile` gets a two-line target and one p
    of AC-1..AC-3 call the runner directly (`cli.main(["conformance", ...])`, `conformance.check_example()`) and never
    depend on the root Makefile. The AC-4 test parses the root Makefile and **fails until the human has pasted the
    snippet below**; it is therefore written in the task after the human step (T6). Until then `make verify` also fails
-   at `idp spec-trace IDP-19` (AC-4 has no test yet); pytest itself stays green.
+   at `idp spec-trace IDP-19` (AC-4 has no test yet). Note: the AC-4 test was in fact written in the failing-tests
+   commit, so pytest (`make test`) stays red on that one test until T5.
 2. **The example must not become a uv workspace member or change root coverage.** The root `pyproject.toml` cannot
    change (`members = ["packages/*"]`, coverage `source = ["packages"]`, `testpaths = ["packages", "tests"]`).
    Chosen: the example has **no `pyproject.toml` and no `uv.lock`**, and its `make verify` uses only `$(PYTHON)`
@@ -79,12 +80,16 @@ def check_example(directory: Path, make: str) -> Result
    reason=f"idp validate: {len(violations)} violation(s)", details=tuple(str(v) for v in violations))`.
 2. `doc, _ = contract._load_yaml(...)` (already used by `profiles.py`); `profiles.resolve(doc["spec"]["build"]["profile"])`;
    `ProfileError` -> `reason="profile: " + "; ".join(exc.lines)`. (Schema-valid documents always have this key.)
-3. `subprocess.run([make, "--no-print-directory", "-C", str(directory), "verify", f"IDP_PROFILE_DIR={dir}"],
-   stdout=PIPE, stderr=STDOUT, text=True, env=<os.environ minus _MAKE_ENV_STRIPPED>, timeout=MAKE_TIMEOUT_S,
-   check=False)`; `TimeoutExpired` -> `reason=f"make verify timed out after {MAKE_TIMEOUT_S} s"`; non-zero ->
+3. `subprocess.Popen([make, "--no-print-directory", "-C", str(directory), "verify", f"IDP_PROFILE_DIR={dir}"],
+   stdout=PIPE, stderr=STDOUT, encoding="utf-8", errors="replace", env=<os.environ minus _MAKE_ENV_STRIPPED>,
+   start_new_session=True)`, then `communicate(timeout=MAKE_TIMEOUT_S)`; `OSError` on launch ->
+   `reason=f"make verify could not run: {exc}"`; `TimeoutExpired` -> `os.killpg(pid, SIGKILL)` kills the whole process
+   group (make and recipe children such as a server), then `reason=f"make verify timed out after {MAKE_TIMEOUT_S} s"`
+   with the output tail as details; non-zero ->
    `reason=f"make verify exited {rc}"`, `details` = last `OUTPUT_TAIL_LINES` output lines. Annotated
-   `# noqa: S603  # nosec B603` and `import subprocess  # nosec B404`, as in `approve_spec.py` (fixed argv, no shell;
-   `make` is an absolute path from `shutil.which`).
+   `# noqa: S603  # nosec B603` and `import subprocess  # nosec B404`, as in `approve_spec.py` (list-form argv, no
+   shell for argv; `make` is an absolute path from `shutil.which`; make runs the example recipes via /bin/sh, which is
+   acceptable because `examples/` is platform-owned, not tenant-contributed).
 
 CLI `_cmd_conformance(args)`: `root = Path(args.dir)`; not a directory -> stderr
 `conformance: '<DIR>' is not a directory`, exit 2; `make = shutil.which("make")` is None -> stderr
@@ -104,7 +109,7 @@ validate and make verify for every example (IDP-19)", positional `dir` (`nargs="
 | examples/minimal-service/README.md | New, short: what the fixture is (not a product, not a template), how to run (`idp validate && make verify` here, or `make conformance` at the root), `IDP_PROFILE_DIR`, and "do not run `make sbom`/`make sca` here" (no own lockfile; spec Q7). (AC-1) |
 | packages/idp-gate/src/idp_gate/conformance.py | New, as designed above. (AC-2, AC-3) |
 | packages/idp-gate/src/idp_gate/cli.py | Import `conformance`, `shutil`; add `_cmd_conformance` and the `conformance` subparser as designed above. Existing commands unchanged. (AC-2, AC-3) |
-| packages/idp-gate/tests/test_conformance.py | New; tagged `IDP-19:AC-2`. Helper writes tiny examples into `tmp_path/examples/<name>/` (valid `idp.yaml` from a dict; Makefile with all required targets and a chosen `verify` recipe, no include); `make` tests skip if `shutil.which("make")` is None. Tests: one line per example + summary for two passing examples, a dir without `idp.yaml` and a `.hidden` dir (exact stdout, exit 0); failing `verify` (`exit 3`) -> `FAIL <p>: make verify exited 2` plus indented output tail, exit 1; timeout via `monkeypatch.setattr(conformance.subprocess, "run", <raises TimeoutExpired>)`; `spec.build.profile: dockerfile` -> `FAIL <p>: profile: 'dockerfile' not found (available: python-uv)`; `monkeypatch.setenv("MAKEFLAGS", "n")` with failing `verify` still FAILs; missing dir / empty dir -> exit 2, stdout empty, exact stderr; `monkeypatch.setattr(cli.shutil, "which", lambda _: None)` (the CLI does the lookup) -> exit 2. (AC-2) |
+| packages/idp-gate/tests/test_conformance.py | New; tagged `IDP-19:AC-2`. Helper writes tiny examples into `tmp_path/examples/<name>/` (valid `idp.yaml` from a dict; Makefile with all required targets and a chosen `verify` recipe, no include); `make` tests skip if `shutil.which("make")` is None. Tests: one line per example + summary for two passing examples, a dir without `idp.yaml` and a `.hidden` dir (exact stdout, exit 0); failing `verify` (`exit 3`) -> `FAIL <p>: make verify exited 2` plus indented output tail, exit 1; timeout via `monkeypatch.setattr(conformance.subprocess, "Popen", <fake whose communicate raises TimeoutExpired>)` plus a real 1 s timeout test asserting the recipe child is killed with the process group; `spec.build.profile: dockerfile` -> `FAIL <p>: profile: 'dockerfile' not found (available: python-uv)`; `monkeypatch.setenv("MAKEFLAGS", "n")` with failing `verify` still FAILs; missing dir / empty dir -> exit 2, stdout empty, exact stderr; `monkeypatch.setattr(cli.shutil, "which", lambda _: None)` (the CLI does the lookup) -> exit 2. (AC-2) |
 | tests/conformance/__init__.py | New, empty (root `tests/` is a package tree). |
 | tests/conformance/fixtures/unknown-field/idp.yaml, Makefile | New negative fixture: minimal-service contract plus `spec.bogusField: true`; Makefile with all required targets (trivial recipes). (AC-3) |
 | tests/conformance/fixtures/missing-target/idp.yaml, Makefile | New negative fixture: valid contract; Makefile with `lint`, `test`, `test-component`, `spec-trace` but no `verify`. (AC-3) |
@@ -121,7 +126,7 @@ Not changed: root `pyproject.toml`, `uv.lock`, `.github/**`, `build-profiles/**`
   ```
   PASS examples/minimal-service
   FAIL examples/unknown-field: idp validate: 1 violation(s)
-      spec: Additional properties are not allowed ('bogusField' was unexpected)
+      spec: 'bogusField' does not match any of the regexes: '^x-'
   conformance: 1 passed, 1 failed
   ```
 - Make (root): new `conformance` target; `verify` gains it as a prerequisite.
@@ -139,7 +144,7 @@ None. Local CLI and Make target; the per-example PASS/FAIL lines appear in the `
 - Risk: `python3` on PATH differs (macOS system 3.9 by hand vs workspace 3.12 under `uv run`). Mitigation: example code
   is 3.9-compatible; CI (ubuntu-24.04) and `uv run` use 3.12.
 - Risk: loopback port or thread issues make the example test flaky. Mitigation: port `0` (kernel-assigned), server
-  bound before the thread starts, no sleeps, 60 s make timeout.
+  bound before the thread starts, no sleeps, 60 s make timeout (kills make's whole process group).
 - Risk: double runtime: the real example runs in pytest (`make test`) and again in `make conformance`. Cost is a few
   seconds; NFR test asserts < 60 s.
 - Risk: diff-cover counts example `.py` lines. They are not in `coverage.xml` (source = `packages`), which diff-cover
