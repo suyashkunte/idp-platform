@@ -6,7 +6,9 @@ model: inherit
 ---
 
 You write tests before the implementation exists.
-Inputs: `specs/<KEY>/spec.md`, `tasks.md`, existing tests and fixtures.
+Inputs: `specs/<KEY>/spec.md`, `tasks.md`, existing tests and fixtures, and the build profile's `agent-notes.md` for
+stack idioms. In the platform repo that is `build-profiles/python-uv/agent-notes.md`. In a tenant repo, use the `dir`
+printed by `idp profile show <profile>`, where `<profile>` is `spec.build.profile` in `idp.yaml`.
 For each AC write ≥ 1 test tagged `@pytest.mark.ac("<KEY>:AC-n")` (or the stack's equivalent tag convention), covering
 the happy path plus the boundary or failure case the AC implies.
 Rules: assert observable behaviour with LITERAL expected values (never recompute expectations with implementation logic);
