@@ -1,13 +1,19 @@
-"""IDP-18: python-uv build profile, build-profile.v1 schema, discovery and `idp profile show`."""
+"""IDP-18: python-uv build profile, build-profile.v1 schema, discovery and `idp profile show`.
+
+IDP-21: reproducible tool resolution (`--exclude-newer`) and clean, sdist-safe packaging of the profiles.
+"""
 
 import importlib
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tomllib
 import zipfile
+from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from types import ModuleType
@@ -25,7 +31,9 @@ PROFILE_YAML = PROFILE_DIR / "profile.yaml"
 DEFAULTS_MK = PROFILE_DIR / "defaults.mk"
 AGENT_NOTES = PROFILE_DIR / "agent-notes.md"
 GENERATOR_AGENT = REPO / "plugins" / "idp-agentic" / "agents" / "unit-test-generator.md"
-PACKAGE_PYPROJECT = REPO / "packages" / "idp-gate" / "pyproject.toml"
+PACKAGE_DIR = REPO / "packages" / "idp-gate"
+PACKAGE_PYPROJECT = PACKAGE_DIR / "pyproject.toml"
+HATCH_BUILD = PACKAGE_DIR / "hatch_build.py"
 SCHEMA_FILE = "build-profile.v1.json"
 
 GENERATOR_FRONTMATTER = (
@@ -214,16 +222,19 @@ _MAKE_ENV_STRIPPED = frozenset(
         "IDP_EXPORT_CMD",
         "IDP_SBOM_REQUIREMENTS",
         "IDP_SBOM_EXPORT_CMD",
+        "IDP_TOOLS_EXCLUDE_NEWER",
     }
 )
 
 
-def _make(directory: Path, *args: str, stub: bool = True) -> subprocess.CompletedProcess[str]:
+def _make(
+    directory: Path, *args: str, stub: bool = True, env_extra: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run make in `directory` with the python-uv profile; tool commands are stubbed unless `stub` is False."""
     if shutil.which("make") is None:
         pytest.skip("make is not installed")
     _require(DEFAULTS_MK)
-    env = {k: v for k, v in os.environ.items() if k not in _MAKE_ENV_STRIPPED}
+    env = {k: v for k, v in os.environ.items() if k not in _MAKE_ENV_STRIPPED} | (env_extra or {})
     argv = ["make", "--no-print-directory", "-C", str(directory), *args, f"IDP_PROFILE_DIR={PROFILE_DIR}"]
     if stub:
         argv += ["IDP_SBOM_CMD=echo default-sbom", "IDP_SCA_CMD=echo default-sca"]
@@ -297,7 +308,8 @@ def test_default_commands_use_profile_tools_in_dry_run(tmp_path: Path) -> None:
     sca = _make(tmp_path, "-n", "sca", "UV=/nonexistent/uv", stub=False)
     assert (sca.returncode, sca.stderr) == (0, "")
     assert (
-        f"{export} && /nonexistent/uv tool run --from pip-audit==2.10.1 pip-audit --disable-pip "
+        f"{export} && /nonexistent/uv tool run --exclude-newer '2026-10-06T00:00:00Z' --from pip-audit==2.10.1 "
+        "pip-audit --disable-pip "
         "--requirement reports/requirements.locked.txt --format json --output reports/sca.json"
     ) in sca.stdout.splitlines()
     sbom_export = (
@@ -307,7 +319,8 @@ def test_default_commands_use_profile_tools_in_dry_run(tmp_path: Path) -> None:
     sbom = _make(tmp_path, "-n", "sbom", "UV=/nonexistent/uv", stub=False)
     assert (sbom.returncode, sbom.stderr) == (0, "")
     assert (
-        f"{sbom_export} && /nonexistent/uv tool run --from cyclonedx-bom==7.5.0 cyclonedx-py requirements "
+        f"{sbom_export} && /nonexistent/uv tool run --exclude-newer '2026-10-06T00:00:00Z' "
+        "--from cyclonedx-bom==7.5.0 cyclonedx-py requirements "
         "--output-format JSON --output-file reports/sbom.cdx.json reports/requirements.sbom.txt"
     ) in sbom.stdout.splitlines()
     # The SBOM describes what ships (runtime deps only); SCA audits every group, dev tools included.
@@ -321,12 +334,161 @@ def test_tool_pins_are_overridable(tmp_path: Path) -> None:
     _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
     sca = _make(tmp_path, "-n", "sca", "IDP_PIP_AUDIT_SPEC=pip-audit==9.9.9", stub=False)
     assert (sca.returncode, sca.stderr) == (0, "")
-    assert "uv tool run --from pip-audit==9.9.9 pip-audit " in sca.stdout
+    # IDP-21: the --exclude-newer option now sits between `tool run` and `--from`.
+    assert "uv tool run --exclude-newer '2026-10-06T00:00:00Z' --from pip-audit==9.9.9 pip-audit " in sca.stdout
     assert "pip-audit==2.10.1" not in sca.stdout
     sbom = _make(tmp_path, "-n", "sbom", "IDP_CYCLONEDX_SPEC=cyclonedx-bom==9.9.9", stub=False)
     assert (sbom.returncode, sbom.stderr) == (0, "")
-    assert "uv tool run --from cyclonedx-bom==9.9.9 cyclonedx-py requirements " in sbom.stdout
+    assert (
+        "uv tool run --exclude-newer '2026-10-06T00:00:00Z' --from cyclonedx-bom==9.9.9 cyclonedx-py requirements "
+    ) in sbom.stdout
     assert "cyclonedx-bom==7.5.0" not in sbom.stdout
+
+
+# --- IDP-21 AC-1 / AC-4: reproducible tool resolution with --exclude-newer ----------------------------------------
+
+
+_SCA_TOOL_RUN = "/nonexistent/uv tool run --exclude-newer '{date}' --from pip-audit==2.10.1 pip-audit "
+_SBOM_TOOL_RUN = (
+    "/nonexistent/uv tool run --exclude-newer '{date}' --from cyclonedx-bom==7.5.0 cyclonedx-py requirements "
+)
+_EXCLUDE_NEWER_EMPTY = "IDP_TOOLS_EXCLUDE_NEWER is empty: set it to a fixed date"
+_EXCLUDE_NEWER_MALFORMED = "IDP_TOOLS_EXCLUDE_NEWER must be a single value without spaces or single quotes"
+
+
+def _tool_run_line(result: subprocess.CompletedProcess[str], target: str) -> str:
+    """The single dry-run line that runs the pinned tool for `target` (export and tool run share one line)."""
+    lines = [line for line in result.stdout.splitlines() if " tool run " in line]
+    assert len(lines) == 1, f"expected one `uv tool run` line for {target}, got: {result.stdout!r}"
+    return lines[0]
+
+
+@pytest.mark.ac("IDP-21:AC-1")
+@pytest.mark.parametrize(
+    ("target", "tool_run", "export_start"),
+    [
+        ("sca", _SCA_TOOL_RUN, "/nonexistent/uv export --quiet --locked --all-packages --no-emit-project "),
+        ("sbom", _SBOM_TOOL_RUN, "/nonexistent/uv export --quiet --locked --all-packages --no-dev --no-emit-project "),
+    ],
+    ids=["sca", "sbom"],
+)
+def test_tool_runs_pass_exclude_newer_in_dry_run(tmp_path: Path, target: str, tool_run: str, export_start: str) -> None:
+    _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    result = _make(tmp_path, "-n", target, "UV=/nonexistent/uv", stub=False)
+    assert (result.returncode, result.stderr) == (0, "")
+    line = _tool_run_line(result, target)
+    export, _, tool = line.partition(" && ")
+    assert export.startswith(export_start)
+    assert "--exclude-newer" not in export  # uv export reads uv.lock and resolves nothing
+    assert tool.startswith(tool_run.format(date="2026-10-06T00:00:00Z"))  # option before --from and the command
+    assert line.count("--exclude-newer") == 1
+    assert not (tmp_path / "reports").exists()
+
+
+@pytest.mark.ac("IDP-21:AC-1")
+def test_exclude_newer_default_is_fixed_and_conditional(tmp_path: Path) -> None:
+    _require(DEFAULTS_MK)
+    lines = DEFAULTS_MK.read_text(encoding="utf-8").splitlines()
+    assignments = [line for line in lines if line.startswith("IDP_TOOLS_EXCLUDE_NEWER")]
+    assert assignments == ["IDP_TOOLS_EXCLUDE_NEWER ?= 2026-10-06T00:00:00Z"]  # literal UTC instant, set with ?=
+    _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    from_env = _make(
+        tmp_path,
+        "-n",
+        "sca",
+        "UV=/nonexistent/uv",
+        stub=False,
+        env_extra={"IDP_TOOLS_EXCLUDE_NEWER": "2027-02-03T04:05:06Z"},
+    )
+    assert (from_env.returncode, from_env.stderr) == (0, "")
+    assert _SCA_TOOL_RUN.format(date="2027-02-03T04:05:06Z") in _tool_run_line(from_env, "sca")
+    assert "2026-10-06T00:00:00Z" not in from_env.stdout
+    tenant_dir = tmp_path / "tenant-assignment"
+    tenant_dir.mkdir()
+    (tenant_dir / "Makefile").write_text(
+        "IDP_TOOLS_EXCLUDE_NEWER = 2028-01-01T00:00:00Z\n"
+        "include $(IDP_PROFILE_DIR)/defaults.mk\n"
+        "build:\n\t@echo tenant-build\n"
+    )
+    from_makefile = _make(tenant_dir, "-n", "sbom", "UV=/nonexistent/uv", stub=False)
+    assert (from_makefile.returncode, from_makefile.stderr) == (0, "")
+    assert _SBOM_TOOL_RUN.format(date="2028-01-01T00:00:00Z") in _tool_run_line(from_makefile, "sbom")
+    assert "2026-10-06T00:00:00Z" not in from_makefile.stdout
+
+
+@pytest.mark.ac("IDP-21:AC-1")
+def test_exclude_newer_is_overridable(tmp_path: Path) -> None:
+    _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    override = "IDP_TOOLS_EXCLUDE_NEWER=2030-01-01T00:00:00Z"
+    sca = _make(tmp_path, "-n", "sca", "UV=/nonexistent/uv", override, stub=False)
+    assert (sca.returncode, sca.stderr) == (0, "")
+    assert _SCA_TOOL_RUN.format(date="2030-01-01T00:00:00Z") in _tool_run_line(sca, "sca")
+    assert "2026-10-06T00:00:00Z" not in sca.stdout
+    sbom = _make(tmp_path, "-n", "sbom", "UV=/nonexistent/uv", override, stub=False)
+    assert (sbom.returncode, sbom.stderr) == (0, "")
+    assert _SBOM_TOOL_RUN.format(date="2030-01-01T00:00:00Z") in _tool_run_line(sbom, "sbom")
+    assert "2026-10-06T00:00:00Z" not in sbom.stdout
+
+
+@pytest.mark.ac("IDP-21:AC-4")
+@pytest.mark.parametrize("target", ["sbom", "sca"])
+@pytest.mark.parametrize(
+    ("args", "env_extra"),
+    [(("IDP_TOOLS_EXCLUDE_NEWER=",), {}), ((), {"IDP_TOOLS_EXCLUDE_NEWER": "   "})],
+    ids=["empty", "whitespace"],
+)
+@pytest.mark.parametrize("stub", [True, False], ids=["stubbed-cmd", "default-cmd"])
+def test_empty_exclude_newer_fails_closed(
+    tmp_path: Path, target: str, args: tuple[str, ...], env_extra: dict[str, str], stub: bool
+) -> None:
+    _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    # UV points nowhere, so even without the guard no real tool can run.
+    result = _make(tmp_path, target, "UV=/nonexistent/uv", *args, stub=stub, env_extra=env_extra)
+    assert result.returncode == 2
+    assert _EXCLUDE_NEWER_EMPTY in result.stderr
+    assert result.stdout == ""
+    assert not (tmp_path / "reports").exists()
+    dry_run = _make(tmp_path, "-n", target, "UV=/nonexistent/uv", *args, stub=stub, env_extra=env_extra)
+    assert dry_run.returncode == 2  # make expands recipes under -n too
+    assert _EXCLUDE_NEWER_EMPTY in dry_run.stderr
+    assert dry_run.stdout == ""
+
+
+@pytest.mark.ac("IDP-21:AC-4")
+@pytest.mark.parametrize("target", ["sbom", "sca"])
+@pytest.mark.parametrize(
+    "value",
+    ["2026-10-06T00:00:00Z --index-url https://evil/simple", "x';touch pwned;'"],
+    ids=["multi-word", "single-quote"],
+)
+@pytest.mark.parametrize("stub", [True, False], ids=["stubbed-cmd", "default-cmd"])
+def test_malformed_exclude_newer_fails_closed(tmp_path: Path, target: str, value: str, stub: bool) -> None:
+    _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    override = f"IDP_TOOLS_EXCLUDE_NEWER={value}"
+    result = _make(tmp_path, target, "UV=/nonexistent/uv", override, stub=stub)
+    assert result.returncode == 2
+    assert _EXCLUDE_NEWER_MALFORMED in result.stderr
+    assert _EXCLUDE_NEWER_EMPTY not in result.stderr
+    assert result.stdout == ""
+    assert not (tmp_path / "reports").exists()
+    assert not (tmp_path / "pwned").exists()  # nothing reached the shell
+    dry_run = _make(tmp_path, "-n", target, "UV=/nonexistent/uv", override, stub=stub)
+    assert dry_run.returncode == 2  # make expands recipes under -n too
+    assert _EXCLUDE_NEWER_MALFORMED in dry_run.stderr
+    assert dry_run.stdout == ""
+
+
+@pytest.mark.ac("IDP-21:AC-4")
+def test_empty_exclude_newer_is_not_checked_at_parse_time(tmp_path: Path) -> None:
+    _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    build = _make(tmp_path, "build", "IDP_TOOLS_EXCLUDE_NEWER=")
+    assert (build.returncode, build.stdout, build.stderr) == (0, "tenant-build\n", "")
+    default_goal = _make(tmp_path, "IDP_TOOLS_EXCLUDE_NEWER=")
+    assert (default_goal.returncode, default_goal.stdout, default_goal.stderr) == (0, "tenant-build\n", "")
+    # The check lives in the sca recipe: only running it fails.
+    sca = _make(tmp_path, "sca", "IDP_TOOLS_EXCLUDE_NEWER=")
+    assert sca.returncode == 2
+    assert _EXCLUDE_NEWER_EMPTY in sca.stderr
 
 
 @pytest.mark.ac("IDP-18:AC-2")
@@ -514,54 +676,245 @@ def test_no_checkout_candidate_lists_only_real_candidates(
 
 
 @pytest.mark.ac("IDP-18:AC-4")
-def test_wheel_config_force_includes_build_profiles() -> None:
+@pytest.mark.ac("IDP-21:AC-2")
+def test_hatch_config_packages_profiles_through_build_hook() -> None:
+    assert HATCH_BUILD.is_file(), "packages/idp-gate/hatch_build.py is missing (IDP-21 build hook not implemented)"
     config = tomllib.loads(PACKAGE_PYPROJECT.read_text(encoding="utf-8"))
-    wheel = config.get("tool", {}).get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
-    assert wheel.get("force-include") == {"../../build-profiles": "idp_gate/build_profiles"}
+    build = config.get("tool", {}).get("hatch", {}).get("build", {})
+    assert build.get("hooks", {}).get("custom") in ({}, {"path": "hatch_build.py"})
+    wheel = build.get("targets", {}).get("wheel", {})
+    assert "force-include" not in wheel  # a static mapping can neither filter nor work from the sdist
+    assert wheel.get("packages") == ["src/idp_gate"]
     assert config["project"]["dependencies"] == ["pyyaml>=6.0", "jsonschema>=4.23"]
+    assert "hatchling>=1.25" in config.get("dependency-groups", {}).get("dev", [])
 
 
-@pytest.mark.ac("IDP-18:AC-4")
-def test_built_wheel_contains_build_profiles(tmp_path: Path) -> None:
-    if shutil.which("uv") is None:
-        pytest.skip("uv is not installed")
-    result = subprocess.run(
-        ["uv", "build", "--wheel", "--offline", "--out-dir", str(tmp_path), "packages/idp-gate"],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
+# --- IDP-21: build hook unit tests (hatch_build.py loaded from its file at test time) ------------------------------
+
+
+def _hatch_build() -> ModuleType:
+    """Load `packages/idp-gate/hatch_build.py` lazily, so a missing hook fails each test instead of collection."""
+    if not HATCH_BUILD.is_file():
+        pytest.fail("packages/idp-gate/hatch_build.py is missing (IDP-21 build hook not implemented)")
+    spec = importlib.util.spec_from_file_location("idp_gate_hatch_build", HATCH_BUILD)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except ModuleNotFoundError as exc:
+        if exc.name is None or not exc.name.startswith("hatchling"):
+            raise
+        pytest.fail("hatchling is not importable: add it to idp-gate's dev dependency group (IDP-21 plan)")
+    return module
+
+
+def _files(root: Path, relpaths: list[str]) -> None:
+    for rel in relpaths:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {rel}\n")
+
+
+@pytest.mark.ac("IDP-21:AC-2")
+def test_profile_file_selection_applies_allow_list(tmp_path: Path) -> None:
+    hook = _hatch_build()
+    source = tmp_path / "build-profiles"
+    _files(
+        source,
+        [
+            "python-uv/profile.yaml",
+            "python-uv/defaults.mk",
+            "python-uv/agent-notes.md",
+            "python-uv/sub/extra.md",
+            "python-uv/notes.txt",
+            "python-uv/.env",
+            "python-uv/.hidden.md",
+            "python-uv/sub/notes.txt",
+            "python-uv/__pycache__/x.pyc",
+            "python-uv/.cache/cached.yaml",
+            ".git/config.mk",
+            "README",
+        ],
     )
-    assert result.returncode == 0, result.stderr
-    [wheel] = sorted(tmp_path.glob("idp_gate-*.whl"))
-    names = set(zipfile.ZipFile(wheel).namelist())
-    expected = {
-        "idp_gate/build_profiles/python-uv/profile.yaml",
-        "idp_gate/build_profiles/python-uv/defaults.mk",
-        "idp_gate/build_profiles/python-uv/agent-notes.md",
-        "idp_gate/schemas/build-profile.v1.json",
+    (source / "python-uv" / "dir.md").mkdir()  # a directory with an allowed suffix is not a file
+    (source / "python-uv" / "link.md").symlink_to(source / "python-uv" / "agent-notes.md")
+    assert hook.select_profile_files(source) == [
+        Path("python-uv/agent-notes.md"),
+        Path("python-uv/defaults.mk"),
+        Path("python-uv/profile.yaml"),
+        Path("python-uv/sub/extra.md"),
+    ]
+
+
+@pytest.mark.ac("IDP-21:AC-3")
+def test_profile_file_selection_prefers_sdist_copy(tmp_path: Path) -> None:
+    hook = _hatch_build()
+    project = tmp_path / "packages" / "idp-gate"
+    _files(tmp_path / "build-profiles", ["python-uv/profile.yaml"])  # the checkout: two levels above the project
+    _files(project / "build-profiles", ["python-uv/profile.yaml"])  # the copy inside an unpacked sdist
+    assert hook.profiles_source(project) == project / "build-profiles"
+    shutil.rmtree(project / "build-profiles")
+    assert hook.profiles_source(project) == tmp_path / "build-profiles"
+
+
+@pytest.mark.ac("IDP-21:AC-3")
+def test_profile_file_selection_fails_without_profiles(tmp_path: Path) -> None:
+    hook = _hatch_build()
+    project = tmp_path / "packages" / "idp-gate"
+    project.mkdir(parents=True)
+    with pytest.raises(RuntimeError) as excinfo:
+        hook.profiles_source(project)
+    message = str(excinfo.value)
+    assert message.startswith("idp-gate build: build profiles not found (looked in: ")
+    assert str(project / "build-profiles") in message
+    assert str(tmp_path / "build-profiles") in message
+    source = tmp_path / "build-profiles"
+    _files(source, ["python-uv/defaults.mk", "python-uv/agent-notes.md", "python-uv/notes.txt", ".x/profile.yaml"])
+    # nothing selected is a profile.yaml: fail closed, no profile-less wheel
+    with pytest.raises(RuntimeError, match=r"no \*/profile\.yaml selected"):
+        hook.select_profile_files(source)
+
+
+@pytest.mark.ac("IDP-21:AC-3")
+def test_profile_source_in_unpacked_sdist_never_falls_back_to_parent(tmp_path: Path) -> None:
+    hook = _hatch_build()
+    project = tmp_path / "packages" / "idp-gate"
+    _files(tmp_path / "build-profiles", ["python-uv/profile.yaml"])  # outside the sdist: must be ignored
+    _files(project, ["PKG-INFO"])  # marks an unpacked sdist without its own build-profiles/
+    with pytest.raises(RuntimeError) as excinfo:
+        hook.profiles_source(project)
+    assert str(excinfo.value) == f"idp-gate build: build profiles not found (looked in: {project / 'build-profiles'})"
+
+
+def _build_hook(module: ModuleType, root: Path, target_name: str) -> Any:
+    """A real `ProfilesBuildHook` (hatchling's constructor only stores its arguments)."""
+    return module.ProfilesBuildHook(str(root), {}, None, None, str(root / "dist"), target_name)
+
+
+@pytest.mark.ac("IDP-21:AC-2")
+@pytest.mark.parametrize(("target_name", "prefix"), [("wheel", "idp_gate/build_profiles"), ("sdist", "build-profiles")])
+def test_build_hook_maps_profiles_per_target(tmp_path: Path, target_name: str, prefix: str) -> None:
+    hook = _hatch_build()
+    project = tmp_path / "packages" / "idp-gate"
+    project.mkdir(parents=True)
+    source = tmp_path / "build-profiles"
+    _files(source, ["python-uv/profile.yaml", "python-uv/defaults.mk", "python-uv/notes.txt"])
+    build_data: dict[str, Any] = {"force_include": {}}
+    _build_hook(hook, project, target_name).initialize("standard", build_data)
+    assert build_data == {
+        "force_include": {
+            str(source / "python-uv/defaults.mk"): f"{prefix}/python-uv/defaults.mk",
+            str(source / "python-uv/profile.yaml"): f"{prefix}/python-uv/profile.yaml",
+        }
     }
-    assert sorted(expected - names) == []
 
 
-@pytest.mark.ac("IDP-18:AC-4")
-def test_installed_wheel_resolves_packaged_python_uv(tmp_path: Path) -> None:
-    if shutil.which("uv") is None:
-        pytest.skip("uv is not installed")
-    dist = tmp_path / "dist"
-    build = subprocess.run(
-        ["uv", "build", "--wheel", "--offline", "--out-dir", str(dist), "packages/idp-gate"],
-        cwd=REPO,
+@pytest.mark.ac("IDP-21:AC-2")
+def test_build_hook_fails_closed_on_unsupported_target(tmp_path: Path) -> None:
+    hook = _hatch_build()
+    project = tmp_path / "packages" / "idp-gate"
+    project.mkdir(parents=True)
+    _files(tmp_path / "build-profiles", ["python-uv/profile.yaml"])
+    build_data: dict[str, Any] = {"force_include": {}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _build_hook(hook, project, "binary").initialize("standard", build_data)
+    assert str(excinfo.value) == "idp-gate build: unsupported build target binary"
+    assert build_data == {"force_include": {}}
+
+
+# --- Session builds: one direct wheel, one sdist -> wheel, both from a temporary copy with stray files -------------
+
+
+_PROFILE_FILES = ("python-uv/agent-notes.md", "python-uv/defaults.mk", "python-uv/profile.yaml")
+_STRAY_FILES = ("python-uv/notes.txt", "python-uv/.env", "python-uv/.hidden.md", "python-uv/sub/notes.txt")
+_PACKAGE_STRAY_FILES = ("creds.yaml", "notes.txt")  # untracked files next to pyproject.toml must not ship
+_SDIST_TOP_LEVEL = frozenset({"PKG-INFO", "pyproject.toml", "hatch_build.py", "src", "tests", "build-profiles"})
+_IGNORE_BYTECODE = shutil.ignore_patterns("__pycache__", "*.pyc")
+
+
+@dataclass(frozen=True)
+class _Build:
+    """Outcome of one `uv build`; tests assert on it so a failed build is a test failure, not a fixture error."""
+
+    out_dir: Path
+    returncode: int
+    stderr: str
+
+
+def _uv_build(tree: Path, out_dir: Path, *flags: str) -> _Build:
+    result = subprocess.run(
+        ["uv", "build", *flags, "--offline", "--out-dir", str(out_dir), str(tree / "packages" / "idp-gate")],
+        cwd=tree,
         capture_output=True,
         text=True,
         timeout=300,
         check=False,
     )
-    assert build.returncode == 0, build.stderr
-    [wheel] = sorted(dist.glob("idp_gate-*.whl"))
+    return _Build(out_dir, result.returncode, result.stderr)
+
+
+@pytest.fixture(scope="session")
+def profile_build_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A temporary copy of the idp-gate build tree with stray files in the python-uv profile and the package dir."""
+    if shutil.which("uv") is None:
+        pytest.skip("uv is not installed")
+    tree = tmp_path_factory.mktemp("profile-build-tree")
+    package = tree / "packages" / "idp-gate"
+    package.mkdir(parents=True)
+    shutil.copy2(PACKAGE_PYPROJECT, package / "pyproject.toml")
+    shutil.copy2(HATCH_BUILD, package / "hatch_build.py")
+    shutil.copytree(PACKAGE_DIR / "src", package / "src", ignore=_IGNORE_BYTECODE)
+    shutil.copytree(REPO / "build-profiles", tree / "build-profiles", ignore=_IGNORE_BYTECODE)
+    _files(tree / "build-profiles", list(_STRAY_FILES))
+    _files(package, list(_PACKAGE_STRAY_FILES))
+    (tree / "build-profiles" / "python-uv" / "link.md").symlink_to(
+        tree / "build-profiles" / "python-uv" / "agent-notes.md"
+    )
+    return tree
+
+
+@pytest.fixture(scope="session")
+def built_wheel(profile_build_tree: Path, tmp_path_factory: pytest.TempPathFactory) -> _Build:
+    """The direct wheel (`uv build --wheel`), built once per session."""
+    return _uv_build(profile_build_tree, tmp_path_factory.mktemp("direct"), "--wheel")
+
+
+@pytest.fixture(scope="session")
+def sdist_built_wheel(profile_build_tree: Path, tmp_path_factory: pytest.TempPathFactory) -> _Build:
+    """`uv build` (sdist, then the wheel built from that sdist), built once per session."""
+    return _uv_build(profile_build_tree, tmp_path_factory.mktemp("sdist"))
+
+
+def _members(archive: Path, prefix: str) -> dict[str, bytes]:
+    """`{path below prefix: bytes}` of the regular files under `prefix` in a wheel or sdist."""
+    if archive.suffix == ".whl":
+        with zipfile.ZipFile(archive) as zf:
+            return {n[len(prefix) :]: zf.read(n) for n in zf.namelist() if n.startswith(prefix) and not n.endswith("/")}
+    found: dict[str, bytes] = {}
+    with tarfile.open(archive) as tf:
+        for info in tf.getmembers():
+            if info.name.startswith(prefix) and info.isfile():
+                extracted = tf.extractfile(info)
+                assert extracted is not None
+                found[info.name[len(prefix) :]] = extracted.read()
+    return found
+
+
+def _repo_profile_files() -> dict[str, bytes]:
+    return {rel: (REPO / "build-profiles" / rel).read_bytes() for rel in _PROFILE_FILES}
+
+
+def _profile_show_from_wheel(wheel: Path, tmp_path: Path) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Unzip `wheel` into a site dir and run `profile show python-uv --json` from it in an isolated interpreter."""
     site = tmp_path.resolve() / "site"
-    zipfile.ZipFile(wheel).extractall(site)
+    with zipfile.ZipFile(wheel) as zf:
+        for name in zf.namelist():
+            target = site / name
+            assert target.resolve().is_relative_to(site)  # no path traversal out of the site dir
+            if not name.endswith("/"):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(zf.read(name))
     code = (
         "import sys; sys.path.insert(0, sys.argv[1]); import idp_gate; from idp_gate.cli import main; "
         "print(idp_gate.__file__, file=sys.stderr); raise SystemExit(main(['profile', 'show', 'python-uv', '--json']))"
@@ -574,10 +927,84 @@ def test_installed_wheel_resolves_packaged_python_uv(tmp_path: Path) -> None:
         timeout=60,
         check=False,
     )
+    return result, site
+
+
+@pytest.mark.ac("IDP-18:AC-4")
+def test_built_wheel_contains_build_profiles(built_wheel: _Build) -> None:
+    assert built_wheel.returncode == 0, built_wheel.stderr
+    wheel = built_wheel.out_dir / "idp_gate-0.1.0-py3-none-any.whl"
+    assert wheel.is_file()
+    names = set(zipfile.ZipFile(wheel).namelist())
+    expected = {
+        "idp_gate/build_profiles/python-uv/profile.yaml",
+        "idp_gate/build_profiles/python-uv/defaults.mk",
+        "idp_gate/build_profiles/python-uv/agent-notes.md",
+        "idp_gate/schemas/build-profile.v1.json",
+    }
+    assert sorted(expected - names) == []
+
+
+@pytest.mark.ac("IDP-18:AC-4")
+def test_installed_wheel_resolves_packaged_python_uv(built_wheel: _Build, tmp_path: Path) -> None:
+    assert built_wheel.returncode == 0, built_wheel.stderr
+    result, site = _profile_show_from_wheel(built_wheel.out_dir / "idp_gate-0.1.0-py3-none-any.whl", tmp_path)
     assert result.returncode == 0, result.stderr
     assert result.stderr == f"{site / 'idp_gate' / '__init__.py'}\n"  # the wheel copy, not the editable install
     shown = json.loads(result.stdout)
     assert shown["name"] == "python-uv"
+    assert shown["dir"] == str(site / "idp_gate" / "build_profiles" / "python-uv")
+
+
+@pytest.mark.ac("IDP-21:AC-2")
+def test_wheel_build_profiles_contain_only_allowed_files(built_wheel: _Build) -> None:
+    assert built_wheel.returncode == 0, built_wheel.stderr
+    members = _members(built_wheel.out_dir / "idp_gate-0.1.0-py3-none-any.whl", "idp_gate/build_profiles/")
+    assert sorted(members) == ["python-uv/agent-notes.md", "python-uv/defaults.mk", "python-uv/profile.yaml"]
+    assert members == _repo_profile_files()
+
+
+@pytest.mark.ac("IDP-21:AC-2")
+def test_sdist_build_profiles_contain_only_allowed_files(sdist_built_wheel: _Build) -> None:
+    sdist = sdist_built_wheel.out_dir / "idp_gate-0.1.0.tar.gz"
+    assert sdist.is_file(), sdist_built_wheel.stderr  # the sdist step runs before the wheel-from-sdist step
+    members = _members(sdist, "idp_gate-0.1.0/build-profiles/")
+    assert sorted(members) == ["python-uv/agent-notes.md", "python-uv/defaults.mk", "python-uv/profile.yaml"]
+    assert members == _repo_profile_files()
+
+
+@pytest.mark.ac("IDP-21:AC-2")
+def test_sdist_contains_only_allow_listed_paths(sdist_built_wheel: _Build) -> None:
+    sdist = sdist_built_wheel.out_dir / "idp_gate-0.1.0.tar.gz"
+    assert sdist.is_file(), sdist_built_wheel.stderr
+    members = sorted(_members(sdist, "idp_gate-0.1.0/"))
+    assert "pyproject.toml" in members
+    assert "src/idp_gate/cli.py" in members
+    strays = [m for m in members if m.split("/", 1)[0] not in _SDIST_TOP_LEVEL]
+    assert strays == []  # creds.yaml and notes.txt next to pyproject.toml stay out
+
+
+@pytest.mark.ac("IDP-21:AC-3")
+def test_sdist_built_wheel_has_same_build_profiles_as_direct_wheel(
+    built_wheel: _Build, sdist_built_wheel: _Build
+) -> None:
+    assert built_wheel.returncode == 0, built_wheel.stderr
+    assert sdist_built_wheel.returncode == 0, sdist_built_wheel.stderr
+    direct = _members(built_wheel.out_dir / "idp_gate-0.1.0-py3-none-any.whl", "idp_gate/build_profiles/")
+    from_sdist = _members(sdist_built_wheel.out_dir / "idp_gate-0.1.0-py3-none-any.whl", "idp_gate/build_profiles/")
+    assert sorted(from_sdist) == ["python-uv/agent-notes.md", "python-uv/defaults.mk", "python-uv/profile.yaml"]
+    assert from_sdist == direct
+    assert from_sdist == _repo_profile_files()
+
+
+@pytest.mark.ac("IDP-21:AC-3")
+def test_profile_show_works_from_sdist_built_wheel(sdist_built_wheel: _Build, tmp_path: Path) -> None:
+    assert sdist_built_wheel.returncode == 0, sdist_built_wheel.stderr
+    result, site = _profile_show_from_wheel(sdist_built_wheel.out_dir / "idp_gate-0.1.0-py3-none-any.whl", tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == f"{site / 'idp_gate' / '__init__.py'}\n"
+    assert '"name": "python-uv"' in result.stdout
+    shown = json.loads(result.stdout)
     assert shown["dir"] == str(site / "idp_gate" / "build_profiles" / "python-uv")
 
 

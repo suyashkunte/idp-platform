@@ -29,7 +29,7 @@ def _checkout_dir(module_file: Path) -> Path | None:
     return repo / "build-profiles" if repo.joinpath(*_CHECKOUT_MARKER).is_file() else None
 
 
-# Installed wheel: profiles are force-included next to the package (see packages/idp-gate/pyproject.toml).
+# Installed wheel: profiles are added next to the package by the build hook (see packages/idp-gate/hatch_build.py).
 _PACKAGED_DIR = Path(__file__).resolve().parent / "build_profiles"
 # Editable workspace install: `idp_gate` is imported from packages/idp-gate/src/, so use the repo checkout.
 _CHECKOUT_DIR: Path | None = _checkout_dir(Path(__file__).resolve())

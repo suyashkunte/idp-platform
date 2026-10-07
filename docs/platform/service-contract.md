@@ -131,8 +131,9 @@ Overridable variables (all `?=`; set them in the Makefile or on the command line
 |---|---|
 | `IDP_SBOM_CMD` | export the locked runtime dependencies (`--no-dev`), then `cyclonedx-py requirements` → `$(REPORTS_DIR)/sbom.cdx.json` |
 | `IDP_SCA_CMD` | export all locked dependency groups (dev included), then `pip-audit --disable-pip --requirement` → `$(REPORTS_DIR)/sca.json` |
-| `IDP_CYCLONEDX_SPEC` | `cyclonedx-bom==7.5.0` (pinned; run with `uv tool run --from`) |
-| `IDP_PIP_AUDIT_SPEC` | `pip-audit==2.10.1` (pinned; run with `uv tool run --from`) |
+| `IDP_CYCLONEDX_SPEC` | `cyclonedx-bom==7.5.0` (pinned; run with `uv tool run --exclude-newer '$(IDP_TOOLS_EXCLUDE_NEWER)' --from`) |
+| `IDP_PIP_AUDIT_SPEC` | `pip-audit==2.10.1` (pinned; run with `uv tool run --exclude-newer '$(IDP_TOOLS_EXCLUDE_NEWER)' --from`) |
+| `IDP_TOOLS_EXCLUDE_NEWER` | `2026-10-06T00:00:00Z` (fixed RFC 3339 UTC instant; passed single-quoted as `--exclude-newer` to `uv tool run`, so the tools' transitive dependencies resolve reproducibly; empty, more than one word or a single quote fails closed) |
 | `REPORTS_DIR` | `reports` |
 | `UV` | `uv` |
 
@@ -143,6 +144,8 @@ Overridable variables (all `?=`; set them in the Makefile or on the command line
   `$(REPORTS_DIR)/requirements.locked.txt`). SCA covers the CI platform only (Linux/CPython, matching the deploy
   target): dependencies conditional on other platforms are not audited. Network is used only when the recipes
   run (tool download, vulnerability database), never at parse time. Names `idp-default-*` and `_idp_*` are reserved.
+- When you bump `IDP_CYCLONEDX_SPEC` or `IDP_PIP_AUDIT_SPEC`, move `IDP_TOOLS_EXCLUDE_NEWER` forward to a UTC instant
+  after the new release too (a bare date is read in the local time zone); otherwise `uv tool run` cannot resolve the pin.
 - `idp profile show <name> [--json]` prints the resolved profile (`profile.yaml` plus `dir`) as YAML, or as one JSON
   line with `--json`, and exits `0`. An invalid name, unknown or invalid profile, or missing profiles directory exits
   `2` with `profile show: ...` on stderr and nothing on stdout.
@@ -156,7 +159,8 @@ Caveats:
 - A Makefile with your own match-anything rule (`%:`) may conflict with the fallback.
 - If `IDP_PROFILE_DIR` is unset, the include becomes `/defaults.mk` and make fails at the include.
 - An empty `IDP_SBOM_CMD`/`IDP_SCA_CMD` fails closed: make stops with an error naming the variable instead of exiting
-  0 without evidence. A failing command fails the target.
+  0 without evidence. An empty `IDP_TOOLS_EXCLUDE_NEWER`, or one with more than one word or a single quote, fails
+  the default `sbom`/`sca` the same way, even if you override the command. A failing command fails the target.
 - `make sca` fails (non-zero exit) when pip-audit finds known vulnerabilities; read the findings in
   `reports/sca.json`. This is deliberate while no gate engine exists; once the policy/gate engine lands, `sca` becomes
   report-only and the gate decides, with severity thresholds and expiring waivers.

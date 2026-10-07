@@ -18,21 +18,31 @@ REPORTS_DIR ?= reports
 # tools run in CI.
 IDP_CYCLONEDX_SPEC ?= cyclonedx-bom==7.5.0
 IDP_PIP_AUDIT_SPEC ?= pip-audit==2.10.1
+# Transitive tool dependencies are resolved as of this fixed instant (uv --exclude-newer), so sbom/sca are
+# reproducible. RFC 3339 UTC on purpose (a bare date is read in the local time zone). When you bump a *_SPEC pin,
+# move this forward too, or the pin may not resolve. The recipes fail closed unless it is exactly one word without a
+# single quote, and pass it single-quoted, so the value can never inject options or shell commands.
+IDP_TOOLS_EXCLUDE_NEWER ?= 2026-10-06T00:00:00Z
 IDP_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.locked.txt
 IDP_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_REQUIREMENTS)
 IDP_SBOM_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.sbom.txt
 IDP_SBOM_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-dev --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_SBOM_REQUIREMENTS)
-IDP_SBOM_CMD ?= $(IDP_SBOM_EXPORT_CMD) && $(UV) tool run --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_SBOM_REQUIREMENTS)
-IDP_SCA_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_PIP_AUDIT_SPEC) pip-audit --disable-pip --requirement $(IDP_REQUIREMENTS) --format json --output $(REPORTS_DIR)/sca.json
+IDP_SBOM_CMD ?= $(IDP_SBOM_EXPORT_CMD) && $(UV) tool run --exclude-newer '$(IDP_TOOLS_EXCLUDE_NEWER)' --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_SBOM_REQUIREMENTS)
+IDP_SCA_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --exclude-newer '$(IDP_TOOLS_EXCLUDE_NEWER)' --from $(IDP_PIP_AUDIT_SPEC) pip-audit --disable-pip --requirement $(IDP_REQUIREMENTS) --format json --output $(REPORTS_DIR)/sca.json
 
 .PHONY: idp-default-sbom idp-default-sca
-# An empty command fails (fail closed) instead of silently producing no evidence.
+# An empty command fails (fail closed) instead of silently producing no evidence; so does an empty or malformed
+# IDP_TOOLS_EXCLUDE_NEWER (more than one word, or a single quote).
 idp-default-sbom:
 	$(if $(strip $(IDP_SBOM_CMD)),,$(error IDP_SBOM_CMD is empty: set it or define your own sbom target))
+	$(if $(strip $(IDP_TOOLS_EXCLUDE_NEWER)),,$(error IDP_TOOLS_EXCLUDE_NEWER is empty: set it to a fixed date (RFC 3339, e.g. 2026-10-06T00:00:00Z) so tool dependencies resolve reproducibly))
+	$(if $(or $(word 2,$(IDP_TOOLS_EXCLUDE_NEWER)),$(findstring ',$(IDP_TOOLS_EXCLUDE_NEWER))),$(error IDP_TOOLS_EXCLUDE_NEWER must be a single value without spaces or single quotes (RFC 3339, e.g. 2026-10-06T00:00:00Z)))
 	@mkdir -p $(REPORTS_DIR)
 	$(IDP_SBOM_CMD)
 idp-default-sca:
 	$(if $(strip $(IDP_SCA_CMD)),,$(error IDP_SCA_CMD is empty: set it or define your own sca target))
+	$(if $(strip $(IDP_TOOLS_EXCLUDE_NEWER)),,$(error IDP_TOOLS_EXCLUDE_NEWER is empty: set it to a fixed date (RFC 3339, e.g. 2026-10-06T00:00:00Z) so tool dependencies resolve reproducibly))
+	$(if $(or $(word 2,$(IDP_TOOLS_EXCLUDE_NEWER)),$(findstring ',$(IDP_TOOLS_EXCLUDE_NEWER))),$(error IDP_TOOLS_EXCLUDE_NEWER must be a single value without spaces or single quotes (RFC 3339, e.g. 2026-10-06T00:00:00Z)))
 	@mkdir -p $(REPORTS_DIR)
 	$(IDP_SCA_CMD)
 

@@ -33,5 +33,8 @@ tests.
 - Put shared fixtures in a `conftest.py` at the narrowest scope that needs them, such as `tests/<area>/conftest.py`.
 - Prefer small factory helpers (`_valid_doc(name="demo") -> dict`) that return fresh data over shared mutable
   fixtures. Each test builds its own data and passes in any order.
+- Build expensive artefacts (for example a wheel via `uv build`) once, in a `@pytest.fixture(scope="session")` fixture
+  that writes under `tmp_path_factory.mktemp(...)`, and share it across the tests that need it. Treat the result as
+  read-only.
 - `make test` runs pytest with coverage and writes JUnit (`junit-unit.xml`) and Cobertura (`coverage.xml`) to
   `$(REPORTS_DIR)`.
