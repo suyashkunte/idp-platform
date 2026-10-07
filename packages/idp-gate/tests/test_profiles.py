@@ -596,6 +596,32 @@ def test_profile_show_invalid_yaml_exits_2(
 
 
 @pytest.mark.ac("IDP-18:AC-5")
+def test_profile_show_unreadable_profile_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path.resolve() / "packaged"
+    (_write_profile(root, "latin", "") / "profile.yaml").write_bytes(b"name: caf\xe9\n")
+    _write_profile(root, "locked", DEMO_YAML.replace("name: demo", "name: locked"))
+    _use_roots(monkeypatch, root, tmp_path.resolve() / "missing")
+    assert _run(["profile", "show", "latin"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("profile show: cannot read 'latin': 'utf-8' codec can't decode byte 0xe9")
+    assert captured.err.count("\n") == 1
+
+    def refuse(path: Path) -> Any:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(contract, "_load_yaml", refuse)
+    assert _run(["profile", "show", "locked", "--json"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        f"profile show: cannot read 'locked': [Errno 13] Permission denied: '{root / 'locked' / 'profile.yaml'}'\n"
+    )
+
+
+@pytest.mark.ac("IDP-18:AC-5")
 @pytest.mark.parametrize(
     ("name", "expected"),
     [

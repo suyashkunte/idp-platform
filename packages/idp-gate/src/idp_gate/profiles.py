@@ -77,7 +77,10 @@ def load(name: str) -> tuple[Path, dict[str, Any]]:
     path = directory / PROFILE_FILE
     if not path.is_file():
         raise ProfileError([f"{name!r} not found (available: {', '.join(available(root))})"])
-    doc, violations = contract._load_yaml(path)
+    try:
+        doc, violations = contract._load_yaml(path)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ProfileError([f"cannot read {name!r}: {exc}"]) from exc
     violations = violations or validate_profile_document(doc, name)
     if violations:
         raise ProfileError([f"{name!r} is invalid ({PROFILE_SCHEMA_ID}): {v}" for v in violations])
