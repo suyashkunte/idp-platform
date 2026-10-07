@@ -184,16 +184,172 @@ def test_makefile_targets_parses_rules_includes_and_ignores_non_rules(tmp_path: 
         "\ttabbed: nope\n"
         "# commented: nope\n"
     )
-    assert contract.makefile_targets(makefile) == {
+    scan = contract.makefile_targets(makefile)
+    assert scan.violations == ()
+    # `spec-trace: KEY = IDP-1` is a target-specific variable, not a rule
+    assert scan.targets == {
         "lint",
         "test",
         "unit-x",
         "test-component",
         "verify",
-        "spec-trace",
         "test-smoke",
         "from-sinclude",
     }
+
+
+@pytest.mark.ac("IDP-17:AC-3")
+@pytest.mark.parametrize(
+    "line",
+    [
+        "spec-trace: VAR = x",
+        "spec-trace: VAR := x",
+        "spec-trace: VAR ::= x",
+        "spec-trace: VAR ?= x",
+        "spec-trace: VAR += x",
+        "spec-trace: VAR != echo x",
+        "spec-trace: VAR=x",
+        "spec-trace: export VAR = x",
+        "spec-trace: override VAR := x",
+        "spec-trace: export override VAR += x",
+    ],
+)
+def test_target_specific_variable_lines_do_not_define_targets(tmp_path: Path, line: str) -> None:
+    makefile = tmp_path / "Makefile"
+    makefile.write_text(f"{line}\nlint: spec-trace-helper\n")
+    assert contract.makefile_targets(makefile).targets == {"lint"}
+
+
+@pytest.mark.ac("IDP-17:AC-3")
+def test_define_bodies_are_skipped_including_nested_ones(tmp_path: Path) -> None:
+    makefile = tmp_path / "Makefile"
+    makefile.write_text(
+        "define RECIPE\n"
+        "inside-define:\n"
+        "endef\n"
+        "override define OUTER\n"
+        "define INNER\n"
+        "inside-nested:\n"
+        "endef\n"
+        "still-inside-outer:\n"
+        "endef\n"
+        "export define EXPORTED =\n"
+        "inside-export:\n"
+        "endef # done\n"
+        "after-define:\n"
+    )
+    assert contract.makefile_targets(makefile).targets == {"after-define"}
+
+
+@pytest.mark.ac("IDP-17:AC-3")
+def test_escaped_hash_does_not_start_a_comment(tmp_path: Path) -> None:
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("lint\\#1 lint: \\# not-a-comment\n# hidden:\nverify: # comment: ghost\n")
+    assert contract.makefile_targets(makefile).targets == {"lint#1", "lint", "verify"}
+
+
+def _make_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> list[str]:
+    """Run `idp validate --json` in `tmp_path`; assert one JSON object and exit 1; return the Makefile messages."""
+    monkeypatch.chdir(tmp_path)
+    assert _run(["validate", "--json"]) == 1
+    out = capsys.readouterr().out
+    assert out.count("\n") == 1
+    return [v["message"] for v in json.loads(out)["violations"] if v["path"] == "Makefile"]
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+@pytest.mark.parametrize("word", ["/etc/passwd", "../outside.mk", "sub/../../outside.mk"])
+def test_include_outside_service_directory_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], word: str
+) -> None:
+    svc = tmp_path / "svc"
+    svc.mkdir()
+    (tmp_path / "outside.mk").write_text("SECRET-TARGET-CONTENT:\n")
+    _write_idp(svc)
+    _write_makefile(svc)
+    with (svc / "Makefile").open("a") as fh:
+        fh.write(f"-include {word}\n")
+    messages = _make_messages(svc, monkeypatch, capsys)
+    assert messages == [f"include {word!r} is outside the service directory"]
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+def test_symlinked_include_outside_service_directory_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    svc = tmp_path / "svc"
+    svc.mkdir()
+    (tmp_path / "outside.mk").write_text("SECRET-TARGET-CONTENT:\n")
+    (svc / "link.mk").symlink_to(tmp_path / "outside.mk")
+    _write_idp(svc)
+    _write_makefile(svc)
+    with (svc / "Makefile").open("a") as fh:
+        fh.write("include link.mk\n")
+    assert _make_messages(svc, monkeypatch, capsys) == ["include 'link.mk' is outside the service directory"]
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+def test_makefile_symlinked_outside_service_directory_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    svc = tmp_path / "svc"
+    svc.mkdir()
+    _write_makefile(tmp_path)
+    (svc / "Makefile").symlink_to(tmp_path / "Makefile")
+    _write_idp(svc)
+    assert _make_messages(svc, monkeypatch, capsys) == ["Makefile resolves outside the service directory"]
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+def test_oversized_makefile_or_include_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path)
+    (tmp_path / "big.mk").write_text("#" * contract.MAX_MAKEFILE_BYTES + "\n")
+    with (tmp_path / "Makefile").open("a") as fh:
+        fh.write("include big.mk\n")
+    assert _make_messages(tmp_path, monkeypatch, capsys) == ["'big.mk' exceeds 1 MiB"]
+    (tmp_path / "Makefile").write_text("#" * (contract.MAX_MAKEFILE_BYTES + 1))
+    assert _make_messages(tmp_path, monkeypatch, capsys) == ["'Makefile' exceeds 1 MiB"]
+    (tmp_path / "Makefile").write_text("lint:\n" + "#" * (contract.MAX_MAKEFILE_BYTES - 6))  # exactly at the cap
+    assert contract.makefile_targets(tmp_path / "Makefile").violations == ()
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+def test_too_many_included_files_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path)
+    names = [f"inc{i}.mk" for i in range(contract.MAX_MAKEFILES)]  # Makefile + 64 includes = 65 files
+    for name in names:
+        (tmp_path / name).write_text("")
+    with (tmp_path / "Makefile").open("a") as fh:
+        fh.write(f"include {' '.join(names)}\n")
+    assert _make_messages(tmp_path, monkeypatch, capsys) == ["too many included files (limit 64)"]
+    (tmp_path / names[-1]).unlink()  # exactly 64 files is fine
+    assert contract.makefile_targets(tmp_path / "Makefile").violations == ()
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+def test_unreadable_files_are_violations_not_tracebacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path)
+    (tmp_path / "latin1.mk").write_bytes(b"caf\xe9:\n")
+    (tmp_path / "loop.mk").symlink_to(tmp_path / "loop.mk")
+    (tmp_path / "adir.mk").mkdir()
+    with (tmp_path / "Makefile").open("a") as fh:
+        fh.write("include latin1.mk\ninclude loop.mk\ninclude adir.mk\n")
+    assert sorted(_make_messages(tmp_path, monkeypatch, capsys)) == [
+        "cannot read 'adir.mk'",
+        "cannot read 'latin1.mk'",
+        "cannot read 'loop.mk'",
+    ]
+    (tmp_path / "Makefile").write_bytes(b"lint:\n\xff\n")
+    assert _make_messages(tmp_path, monkeypatch, capsys) == ["cannot read 'Makefile'"]
 
 
 @pytest.mark.ac("IDP-17:AC-2")
@@ -226,6 +382,23 @@ def test_disabled_test_kind_does_not_require_target(
     _write_makefile(tmp_path, ("lint", "test", "test-component", "verify", "spec-trace", "test-smoke"))
     assert _run(["validate"]) == 0
     assert capsys.readouterr().out == "idp.yaml: valid (idp-service.v1.json)\n"
+
+
+@pytest.mark.ac("IDP-17:AC-2")
+@pytest.mark.parametrize("tests_value", [{"smoke": "true"}, ["smoke", "api"]])
+def test_non_boolean_or_non_mapping_tests_only_give_schema_violations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tests_value: Any
+) -> None:
+    doc = _doc_example()
+    doc["spec"]["tests"] = tests_value
+    _write_idp(tmp_path, doc)
+    _write_makefile(tmp_path, ("lint", "test", "test-component", "verify", "spec-trace"))
+    monkeypatch.chdir(tmp_path)
+    assert _run(["validate", "--json"]) == 1
+    violations = json.loads(capsys.readouterr().out)["violations"]
+    assert violations
+    assert all(v["path"].startswith("spec.tests") for v in violations)
+    assert not any("test-smoke" in v["message"] or "test-api" in v["message"] for v in violations)
 
 
 @pytest.mark.ac("IDP-17:AC-3")
@@ -303,8 +476,8 @@ def test_target_detection_never_runs_make(
     monkeypatch.chdir(tmp_path)
     assert _run(["validate"]) == 1
     assert capsys.readouterr().out == "idp.yaml: Makefile: missing required target 'lint'\n"
-    assert "lint" not in contract.makefile_targets(makefile)
-    assert "verify" in contract.makefile_targets(makefile)
+    assert "lint" not in contract.makefile_targets(makefile).targets
+    assert "verify" in contract.makefile_targets(makefile).targets
 
 
 @pytest.mark.ac("IDP-17:AC-4")
