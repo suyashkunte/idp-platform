@@ -308,7 +308,7 @@ def test_default_commands_use_profile_tools_in_dry_run(tmp_path: Path) -> None:
     sca = _make(tmp_path, "-n", "sca", "UV=/nonexistent/uv", stub=False)
     assert (sca.returncode, sca.stderr) == (0, "")
     assert (
-        f"{export} && /nonexistent/uv tool run --exclude-newer 2026-10-06T00:00:00Z --from pip-audit==2.10.1 "
+        f"{export} && /nonexistent/uv tool run --exclude-newer '2026-10-06T00:00:00Z' --from pip-audit==2.10.1 "
         "pip-audit --disable-pip "
         "--requirement reports/requirements.locked.txt --format json --output reports/sca.json"
     ) in sca.stdout.splitlines()
@@ -319,7 +319,7 @@ def test_default_commands_use_profile_tools_in_dry_run(tmp_path: Path) -> None:
     sbom = _make(tmp_path, "-n", "sbom", "UV=/nonexistent/uv", stub=False)
     assert (sbom.returncode, sbom.stderr) == (0, "")
     assert (
-        f"{sbom_export} && /nonexistent/uv tool run --exclude-newer 2026-10-06T00:00:00Z "
+        f"{sbom_export} && /nonexistent/uv tool run --exclude-newer '2026-10-06T00:00:00Z' "
         "--from cyclonedx-bom==7.5.0 cyclonedx-py requirements "
         "--output-format JSON --output-file reports/sbom.cdx.json reports/requirements.sbom.txt"
     ) in sbom.stdout.splitlines()
@@ -335,12 +335,12 @@ def test_tool_pins_are_overridable(tmp_path: Path) -> None:
     sca = _make(tmp_path, "-n", "sca", "IDP_PIP_AUDIT_SPEC=pip-audit==9.9.9", stub=False)
     assert (sca.returncode, sca.stderr) == (0, "")
     # IDP-21: the --exclude-newer option now sits between `tool run` and `--from`.
-    assert "uv tool run --exclude-newer 2026-10-06T00:00:00Z --from pip-audit==9.9.9 pip-audit " in sca.stdout
+    assert "uv tool run --exclude-newer '2026-10-06T00:00:00Z' --from pip-audit==9.9.9 pip-audit " in sca.stdout
     assert "pip-audit==2.10.1" not in sca.stdout
     sbom = _make(tmp_path, "-n", "sbom", "IDP_CYCLONEDX_SPEC=cyclonedx-bom==9.9.9", stub=False)
     assert (sbom.returncode, sbom.stderr) == (0, "")
     assert (
-        "uv tool run --exclude-newer 2026-10-06T00:00:00Z --from cyclonedx-bom==9.9.9 cyclonedx-py requirements "
+        "uv tool run --exclude-newer '2026-10-06T00:00:00Z' --from cyclonedx-bom==9.9.9 cyclonedx-py requirements "
     ) in sbom.stdout
     assert "cyclonedx-bom==7.5.0" not in sbom.stdout
 
@@ -348,11 +348,12 @@ def test_tool_pins_are_overridable(tmp_path: Path) -> None:
 # --- IDP-21 AC-1 / AC-4: reproducible tool resolution with --exclude-newer ----------------------------------------
 
 
-_SCA_TOOL_RUN = "/nonexistent/uv tool run --exclude-newer {date} --from pip-audit==2.10.1 pip-audit "
+_SCA_TOOL_RUN = "/nonexistent/uv tool run --exclude-newer '{date}' --from pip-audit==2.10.1 pip-audit "
 _SBOM_TOOL_RUN = (
-    "/nonexistent/uv tool run --exclude-newer {date} --from cyclonedx-bom==7.5.0 cyclonedx-py requirements "
+    "/nonexistent/uv tool run --exclude-newer '{date}' --from cyclonedx-bom==7.5.0 cyclonedx-py requirements "
 )
 _EXCLUDE_NEWER_EMPTY = "IDP_TOOLS_EXCLUDE_NEWER is empty: set it to a fixed date"
+_EXCLUDE_NEWER_MALFORMED = "IDP_TOOLS_EXCLUDE_NEWER must be a single value without spaces or single quotes"
 
 
 def _tool_run_line(result: subprocess.CompletedProcess[str], target: str) -> str:
@@ -450,6 +451,30 @@ def test_empty_exclude_newer_fails_closed(
     dry_run = _make(tmp_path, "-n", target, "UV=/nonexistent/uv", *args, stub=stub, env_extra=env_extra)
     assert dry_run.returncode == 2  # make expands recipes under -n too
     assert _EXCLUDE_NEWER_EMPTY in dry_run.stderr
+    assert dry_run.stdout == ""
+
+
+@pytest.mark.ac("IDP-21:AC-4")
+@pytest.mark.parametrize("target", ["sbom", "sca"])
+@pytest.mark.parametrize(
+    "value",
+    ["2026-10-06T00:00:00Z --index-url https://evil/simple", "x';touch pwned;'"],
+    ids=["multi-word", "single-quote"],
+)
+@pytest.mark.parametrize("stub", [True, False], ids=["stubbed-cmd", "default-cmd"])
+def test_malformed_exclude_newer_fails_closed(tmp_path: Path, target: str, value: str, stub: bool) -> None:
+    _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    override = f"IDP_TOOLS_EXCLUDE_NEWER={value}"
+    result = _make(tmp_path, target, "UV=/nonexistent/uv", override, stub=stub)
+    assert result.returncode == 2
+    assert _EXCLUDE_NEWER_MALFORMED in result.stderr
+    assert _EXCLUDE_NEWER_EMPTY not in result.stderr
+    assert result.stdout == ""
+    assert not (tmp_path / "reports").exists()
+    assert not (tmp_path / "pwned").exists()  # nothing reached the shell
+    dry_run = _make(tmp_path, "-n", target, "UV=/nonexistent/uv", override, stub=stub)
+    assert dry_run.returncode == 2  # make expands recipes under -n too
+    assert _EXCLUDE_NEWER_MALFORMED in dry_run.stderr
     assert dry_run.stdout == ""
 
 
@@ -803,6 +828,8 @@ def test_build_hook_fails_closed_on_unsupported_target(tmp_path: Path) -> None:
 
 _PROFILE_FILES = ("python-uv/agent-notes.md", "python-uv/defaults.mk", "python-uv/profile.yaml")
 _STRAY_FILES = ("python-uv/notes.txt", "python-uv/.env", "python-uv/.hidden.md", "python-uv/sub/notes.txt")
+_PACKAGE_STRAY_FILES = ("creds.yaml", "notes.txt")  # untracked files next to pyproject.toml must not ship
+_SDIST_TOP_LEVEL = frozenset({"PKG-INFO", "pyproject.toml", "hatch_build.py", "src", "tests", "build-profiles"})
 _IGNORE_BYTECODE = shutil.ignore_patterns("__pycache__", "*.pyc")
 
 
@@ -829,7 +856,7 @@ def _uv_build(tree: Path, out_dir: Path, *flags: str) -> _Build:
 
 @pytest.fixture(scope="session")
 def profile_build_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A temporary copy of the idp-gate build tree whose python-uv profile also holds stray files."""
+    """A temporary copy of the idp-gate build tree with stray files in the python-uv profile and the package dir."""
     if shutil.which("uv") is None:
         pytest.skip("uv is not installed")
     tree = tmp_path_factory.mktemp("profile-build-tree")
@@ -840,6 +867,7 @@ def profile_build_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     shutil.copytree(PACKAGE_DIR / "src", package / "src", ignore=_IGNORE_BYTECODE)
     shutil.copytree(REPO / "build-profiles", tree / "build-profiles", ignore=_IGNORE_BYTECODE)
     _files(tree / "build-profiles", list(_STRAY_FILES))
+    _files(package, list(_PACKAGE_STRAY_FILES))
     (tree / "build-profiles" / "python-uv" / "link.md").symlink_to(
         tree / "build-profiles" / "python-uv" / "agent-notes.md"
     )
@@ -943,6 +971,17 @@ def test_sdist_build_profiles_contain_only_allowed_files(sdist_built_wheel: _Bui
     members = _members(sdist, "idp_gate-0.1.0/build-profiles/")
     assert sorted(members) == ["python-uv/agent-notes.md", "python-uv/defaults.mk", "python-uv/profile.yaml"]
     assert members == _repo_profile_files()
+
+
+@pytest.mark.ac("IDP-21:AC-2")
+def test_sdist_contains_only_allow_listed_paths(sdist_built_wheel: _Build) -> None:
+    sdist = sdist_built_wheel.out_dir / "idp_gate-0.1.0.tar.gz"
+    assert sdist.is_file(), sdist_built_wheel.stderr
+    members = sorted(_members(sdist, "idp_gate-0.1.0/"))
+    assert "pyproject.toml" in members
+    assert "src/idp_gate/cli.py" in members
+    strays = [m for m in members if m.split("/", 1)[0] not in _SDIST_TOP_LEVEL]
+    assert strays == []  # creds.yaml and notes.txt next to pyproject.toml stay out
 
 
 @pytest.mark.ac("IDP-21:AC-3")

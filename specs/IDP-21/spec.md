@@ -88,6 +88,14 @@ twice. All of this has to be fixed before S5 uses the `idp-gate` wheel. Parent e
 - ASSUMPTION A3: the build fails when no profiles source exists or the allow-list selects no `profile.yaml`.
 - ASSUMPTION A4: make checks only that the value is non-empty, not its format.
 - ASSUMPTION A5: the empty-value guard is unconditional inside the default recipes.
+- PR #8 security review, two reviewer-requested hardening changes (no AC change):
+  (1) the sdist is allow-listed with `[tool.hatch.build.targets.sdist] only-include = ["src", "tests",
+  "hatch_build.py", "pyproject.toml"]`, so untracked files in `packages/idp-gate/` never ship (AC-2; tested by
+  planting `creds.yaml` and `notes.txt` next to `pyproject.toml` in the existing session build tree, no extra build).
+  (2) `IDP_TOOLS_EXCLUDE_NEWER` is passed single-quoted (`--exclude-newer '$(IDP_TOOLS_EXCLUDE_NEWER)'`), and a
+  second recipe-time guard fails closed (exit 2, nothing runs, no reports dir, also under `make -n`) when the value
+  has more than one word or contains a single quote (AC-4). This refines A4: make still does not check the date
+  format.
 - ASSUMPTION A6: the packaging fix uses a hatch custom build hook (`packages/idp-gate/hatch_build.py`) instead of
   static `force-include` (see plan.md, Q3).
 
@@ -152,6 +160,6 @@ twice. All of this has to be fixed before S5 uses the `idp-gate` wheel. Parent e
 | AC | Planned tests |
 |----|---------------|
 | AC-1 | packages/idp-gate/tests/test_profiles.py::test_tool_runs_pass_exclude_newer_in_dry_run, packages/idp-gate/tests/test_profiles.py::test_exclude_newer_default_is_fixed_and_conditional, packages/idp-gate/tests/test_profiles.py::test_exclude_newer_is_overridable |
-| AC-2 | packages/idp-gate/tests/test_profiles.py::test_wheel_build_profiles_contain_only_allowed_files, packages/idp-gate/tests/test_profiles.py::test_sdist_build_profiles_contain_only_allowed_files, packages/idp-gate/tests/test_profiles.py::test_profile_file_selection_applies_allow_list, packages/idp-gate/tests/test_profiles.py::test_hatch_config_packages_profiles_through_build_hook |
+| AC-2 | packages/idp-gate/tests/test_profiles.py::test_wheel_build_profiles_contain_only_allowed_files, packages/idp-gate/tests/test_profiles.py::test_sdist_build_profiles_contain_only_allowed_files, packages/idp-gate/tests/test_profiles.py::test_sdist_contains_only_allow_listed_paths, packages/idp-gate/tests/test_profiles.py::test_profile_file_selection_applies_allow_list, packages/idp-gate/tests/test_profiles.py::test_hatch_config_packages_profiles_through_build_hook |
 | AC-3 | packages/idp-gate/tests/test_profiles.py::test_sdist_built_wheel_has_same_build_profiles_as_direct_wheel, packages/idp-gate/tests/test_profiles.py::test_profile_show_works_from_sdist_built_wheel, packages/idp-gate/tests/test_profiles.py::test_profile_file_selection_prefers_sdist_copy, packages/idp-gate/tests/test_profiles.py::test_profile_file_selection_fails_without_profiles |
-| AC-4 | packages/idp-gate/tests/test_profiles.py::test_empty_exclude_newer_fails_closed, packages/idp-gate/tests/test_profiles.py::test_empty_exclude_newer_is_not_checked_at_parse_time |
+| AC-4 | packages/idp-gate/tests/test_profiles.py::test_empty_exclude_newer_fails_closed, packages/idp-gate/tests/test_profiles.py::test_malformed_exclude_newer_fails_closed, packages/idp-gate/tests/test_profiles.py::test_empty_exclude_newer_is_not_checked_at_parse_time |

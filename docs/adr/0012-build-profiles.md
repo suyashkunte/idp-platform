@@ -76,7 +76,7 @@ Status stays Proposed (IDP-21 spec, Q6).
 
 ### Reproducible tool resolution
 - The `*_SPEC` pins fix only the top-level tools. To freeze their transitive dependencies too, the python-uv
-  [`defaults.mk`](../../build-profiles/python-uv/defaults.mk) passes `--exclude-newer $(IDP_TOOLS_EXCLUDE_NEWER)` to
+  [`defaults.mk`](../../build-profiles/python-uv/defaults.mk) passes `--exclude-newer '$(IDP_TOOLS_EXCLUDE_NEWER)'` to
   both `uv tool run` invocations (before `--from`, because uv reads options only before the command). `uv export` does
   not get the option: it reads the existing uv.lock and resolves nothing.
 - `IDP_TOOLS_EXCLUDE_NEWER ?= 2026-10-06T00:00:00Z`: a fixed RFC 3339 UTC instant (the IDP-18 pin date), never
@@ -86,8 +86,11 @@ Status stays Proposed (IDP-21 spec, Q6).
 - Fail closed: an empty (or whitespace-only) value stops `idp-default-sbom`/`idp-default-sca` with
   `IDP_TOOLS_EXCLUDE_NEWER is empty: ...` before anything runs. The guard is a recipe line, so parse time stays
   command-free and unrelated targets are unaffected. It applies even when `IDP_SBOM_CMD`/`IDP_SCA_CMD` is overridden;
-  a tenant-defined `sbom`/`sca` target never runs it. The value's format is not checked by make; uv rejects a
-  malformed value when the recipe runs.
+  a tenant-defined `sbom`/`sca` target never runs it. A second guard line (PR #8 security review) also fails closed,
+  with `IDP_TOOLS_EXCLUDE_NEWER must be a single value without spaces or single quotes ...`, when the value has more
+  than one word or contains a single quote; the command lines pass it single-quoted. Together these stop the value
+  from injecting extra uv options or shell commands. The date format itself is not checked by make; uv rejects a
+  malformed date when the recipe runs.
 - Bumping a `*_SPEC` pin requires moving `IDP_TOOLS_EXCLUDE_NEWER` forward in the same change; otherwise a pin
   released after that instant cannot resolve.
 
@@ -102,6 +105,10 @@ Status stays Proposed (IDP-21 spec, Q6).
   The hook uses `<root>/build-profiles` first; inside an unpacked sdist (`PKG-INFO` present) it uses only that copy and
   never looks outside the sdist, otherwise it falls back to the checkout's `<root>/../../build-profiles`. A direct wheel
   build and a wheel built from the sdist therefore contain the same files with identical bytes.
+- The sdist is allow-listed as well (PR #8 security review): `[tool.hatch.build.targets.sdist] only-include =
+  ["src", "tests", "hatch_build.py", "pyproject.toml"]`, plus the hook's `build-profiles/` and the files hatchling
+  always adds (`PKG-INFO`, and the nearest `.gitignore` up to the repository root). An untracked file next to
+  `pyproject.toml` (`creds.yaml`, `id_rsa`) therefore never ships.
 - Fail closed: the build stops with an error when no profiles source exists, when no `*/profile.yaml` is selected, or
   for an unknown build target, instead of producing a wheel without profiles.
 - Install layout and discovery (above) are unchanged. `hatchling` is in idp-gate's dev dependency group only, so mypy
