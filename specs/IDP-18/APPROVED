@@ -1,0 +1,10 @@
+{
+  "ticket": "IDP-18",
+  "approver": {
+    "name": "Suyash Kunte",
+    "email": "suyashkunte@gmail.com"
+  },
+  "approved_at": "2026-10-07T09:55:54+00:00",
+  "spec_sha256": "aa54e0b6ec7a5c526cd92106df482cf25c23f2a8e1ae3dd41036fa398651e51d",
+  "head_commit": "7cb84e997fc7d80667b44287a04030941cf32462"
+}
