@@ -1,0 +1,17 @@
+# IDP-19 conformance fixture, not a product: the smallest service that passes `idp validate` and `make verify` with
+# the python-uv build profile defaults. Platform CI checks it with `idp conformance examples` (root `make conformance`).
+apiVersion: idp.dev/v1
+kind: Service
+metadata:
+  name: minimal-service
+  owner: platform
+  tier: 3
+  tracker: { kind: jira, site: suyashkunte.atlassian.net, project: IDP, labels: [repo:idp-platform] }
+spec:
+  type: web-api
+  target: kubernetes
+  build:
+    profile: python-uv
+  runtime:
+    port: 8000
+    health: { live: /healthz/live, ready: /healthz/ready, startup: /healthz/startup }
