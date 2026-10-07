@@ -46,7 +46,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     if not path.is_file():
         print(f"validate: {path} not found", file=sys.stderr)
         return 2
-    violations = contract.validate_file(path)
+    violations = contract.validate_service(path)
     for v in violations:
         print(f"{path}: {v}")
     if not violations:
