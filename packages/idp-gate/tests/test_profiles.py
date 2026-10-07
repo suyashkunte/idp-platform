@@ -746,8 +746,56 @@ def test_profile_file_selection_fails_without_profiles(tmp_path: Path) -> None:
     assert str(tmp_path / "build-profiles") in message
     source = tmp_path / "build-profiles"
     _files(source, ["python-uv/defaults.mk", "python-uv/agent-notes.md", "python-uv/notes.txt", ".x/profile.yaml"])
-    with pytest.raises(RuntimeError):  # nothing selected is a profile.yaml: fail closed, no profile-less wheel
+    # nothing selected is a profile.yaml: fail closed, no profile-less wheel
+    with pytest.raises(RuntimeError, match=r"no \*/profile\.yaml selected"):
         hook.select_profile_files(source)
+
+
+@pytest.mark.ac("IDP-21:AC-3")
+def test_profile_source_in_unpacked_sdist_never_falls_back_to_parent(tmp_path: Path) -> None:
+    hook = _hatch_build()
+    project = tmp_path / "packages" / "idp-gate"
+    _files(tmp_path / "build-profiles", ["python-uv/profile.yaml"])  # outside the sdist: must be ignored
+    _files(project, ["PKG-INFO"])  # marks an unpacked sdist without its own build-profiles/
+    with pytest.raises(RuntimeError) as excinfo:
+        hook.profiles_source(project)
+    assert str(excinfo.value) == f"idp-gate build: build profiles not found (looked in: {project / 'build-profiles'})"
+
+
+def _build_hook(module: ModuleType, root: Path, target_name: str) -> Any:
+    """A real `ProfilesBuildHook` (hatchling's constructor only stores its arguments)."""
+    return module.ProfilesBuildHook(str(root), {}, None, None, str(root / "dist"), target_name)
+
+
+@pytest.mark.ac("IDP-21:AC-2")
+@pytest.mark.parametrize(("target_name", "prefix"), [("wheel", "idp_gate/build_profiles"), ("sdist", "build-profiles")])
+def test_build_hook_maps_profiles_per_target(tmp_path: Path, target_name: str, prefix: str) -> None:
+    hook = _hatch_build()
+    project = tmp_path / "packages" / "idp-gate"
+    project.mkdir(parents=True)
+    source = tmp_path / "build-profiles"
+    _files(source, ["python-uv/profile.yaml", "python-uv/defaults.mk", "python-uv/notes.txt"])
+    build_data: dict[str, Any] = {"force_include": {}}
+    _build_hook(hook, project, target_name).initialize("standard", build_data)
+    assert build_data == {
+        "force_include": {
+            str(source / "python-uv/defaults.mk"): f"{prefix}/python-uv/defaults.mk",
+            str(source / "python-uv/profile.yaml"): f"{prefix}/python-uv/profile.yaml",
+        }
+    }
+
+
+@pytest.mark.ac("IDP-21:AC-2")
+def test_build_hook_fails_closed_on_unsupported_target(tmp_path: Path) -> None:
+    hook = _hatch_build()
+    project = tmp_path / "packages" / "idp-gate"
+    project.mkdir(parents=True)
+    _files(tmp_path / "build-profiles", ["python-uv/profile.yaml"])
+    build_data: dict[str, Any] = {"force_include": {}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _build_hook(hook, project, "binary").initialize("standard", build_data)
+    assert str(excinfo.value) == "idp-gate build: unsupported build target binary"
+    assert build_data == {"force_include": {}}
 
 
 # --- Session builds: one direct wheel, one sdist -> wheel, both from a temporary copy with stray files -------------
@@ -788,8 +836,7 @@ def profile_build_tree(tmp_path_factory: pytest.TempPathFactory) -> Path:
     package = tree / "packages" / "idp-gate"
     package.mkdir(parents=True)
     shutil.copy2(PACKAGE_PYPROJECT, package / "pyproject.toml")
-    if HATCH_BUILD.is_file():
-        shutil.copy2(HATCH_BUILD, package / "hatch_build.py")
+    shutil.copy2(HATCH_BUILD, package / "hatch_build.py")
     shutil.copytree(PACKAGE_DIR / "src", package / "src", ignore=_IGNORE_BYTECODE)
     shutil.copytree(REPO / "build-profiles", tree / "build-profiles", ignore=_IGNORE_BYTECODE)
     _files(tree / "build-profiles", list(_STRAY_FILES))
