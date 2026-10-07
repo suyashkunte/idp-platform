@@ -113,3 +113,59 @@ Status stays Proposed (IDP-21 spec, Q6).
   for an unknown build target, instead of producing a wheel without profiles.
 - Install layout and discovery (above) are unchanged. `hatchling` is in idp-gate's dev dependency group only, so mypy
   strict checks the hook against real types; runtime dependencies are unchanged.
+
+## Implementation notes (IDP-24)
+Status stays Proposed (IDP-24 spec, Q8).
+
+### Locked, hash-checked build backend
+- `build-system.requires` stays `["hatchling>=1.25"]`. The builds this repository runs narrow it with
+  [`packages/idp-gate/build-constraints.txt`](../../packages/idp-gate/build-constraints.txt): `==` pins plus every
+  sha256 hash that [`uv.lock`](../../uv.lock) records for hatchling and its closure (`packaging`, `pathspec`, `pluggy`,
+  `tomlkit`, `trove-classifiers`). Chosen over `--exclude-newer`, which gives only a date cutoff, no integrity check and
+  a second source of truth next to uv.lock.
+- The file is generated, never edited by hand:
+  `uv export --frozen --package idp-gate --only-group dev --no-emit-project --output-file packages/idp-gate/build-constraints.txt`.
+  idp-gate's dev group must stay hatchling-only while this command is the generator: the drift test
+  (`test_build_constraints_pin_locked_build_backend_with_hashes` in
+  [`test_profiles.py`](../../packages/idp-gate/tests/test_profiles.py)) compares the file with the hatchling closure
+  in uv.lock (names, versions, hash sets) and fails closed on any extra package. Its failure message names the
+  regeneration command.
+- Bumping hatchling is a deliberate change: `uv lock --upgrade-package hatchling`, regenerate the file with the
+  command above, commit both. The drift test fails if only one of them changes.
+- Today the only `uv build` runs are the two session fixtures in `test_profiles.py` (reached in CI via `make verify`).
+  They pass `--offline --no-config --build-constraint packages/idp-gate/build-constraints.txt --require-hashes`. Any
+  future CI, Make or release build of idp-gate must pass the same flags. `make setup` (`uv sync --all-packages`) puts
+  the locked closure in the uv cache; without it the offline builds fail and name the missing package.
+- The session tests also check that both built wheels report `Generator: hatchling <locked version>`.
+
+### Clean environment for `uv build`
+- `uv build` gets the current environment minus every variable whose name starts with `UV_` or `PIP_`, except the
+  location-only keep-list `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` (needed so the offline build finds the cache that
+  `uv sync` filled). `--no-config` stops a user-level `uv.toml` from changing the build.
+- The session builds run with `UV_INDEX_URL`, `UV_NO_BUILD_ISOLATION` and `PIP_INDEX_URL` deliberately set in their
+  base environment; the stripped result and the unchanged IDP-18/IDP-21 content tests show the result equals a clean
+  build. Only variable names are recorded for assertions, never values.
+
+### Symlinks
+- `select_profile_files` walks with `os.walk(source, followlinks=False)`: directory symlinks anywhere in the profiles
+  tree are never descended into, whether they point outside the tree or back inside it. File symlinks stay rejected
+  by the IDP-21 allow-list.
+- `profiles_source` fails closed when a `build-profiles` candidate (sdist copy or checkout) is itself a symlink,
+  including a dangling one: `idp-gate build: build profiles source is a symlink, refusing to follow it: <path>`. It
+  never falls back to the next candidate.
+- Only the `build-profiles` component is checked, not its ancestors, so a checkout under a symlinked path (for example
+  macOS `/tmp -> /private/tmp`) still builds.
+
+### Known gaps (review of IDP-24)
+Found by both PR reviewers; open, not covered by this change.
+- Editable installs via `uv sync` (CI [`platform-ci.yml`](../../.github/workflows/platform-ci.yml) and `make setup`)
+  still build idp-gate with an unconstrained, unhashed `hatchling>=1.25` and the full environment; `uv sync` has no
+  build-constraint flag. Proposed fix: `[tool.uv] build-constraint-dependencies` in the root `pyproject.toml`
+  (protected, human edit; version pins only, no hashes), plus extending the drift test to it.
+- The hashes protect against substitution on the index or network, not against a tampered local uv cache
+  (`UV_CACHE_DIR` is kept). The interpreter taken from `UV_PYTHON_INSTALL_DIR` is not hashed.
+- Only `UV_*`/`PIP_*` are stripped; `PYTHONPATH`, `HATCH_BUILD_*` and similar variables still reach the build backend.
+- The symlink checks run at selection time, so there is a TOCTOU window; hardlinks are not detected; `os.walk`
+  silently skips unreadable subdirectories; Windows junctions are not refused. Exploiting any of these needs local
+  write access to the checkout.
+- The sdist does not ship `build-constraints.txt`, so third-party builds of the sdist are unconstrained (out of scope).
