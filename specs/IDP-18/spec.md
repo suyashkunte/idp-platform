@@ -37,13 +37,14 @@ discovery mechanism that works from the installed package, and `idp profile show
 - **AC-2** Given a tenant Makefile that includes the profile's `defaults.mk` and does not define `sbom` or `sca`, when I run `make sbom` / `make sca`, then the profile defaults run.
   - Defaults run the commands in variables `IDP_SBOM_CMD` and `IDP_SCA_CMD` (assigned with `?=`, so a tenant or a test
     can override them on the command line or in the Makefile). Default values (ASSUMPTION A4, Q4 resolved): both first
-    run `IDP_EXPORT_CMD ?= $(UV) export --quiet --frozen --all-packages --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_REQUIREMENTS)`
+    run `IDP_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_REQUIREMENTS)`
     (`IDP_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.locked.txt`, hashed), then
     `IDP_SBOM_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_REQUIREMENTS)`
     and `IDP_SCA_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_PIP_AUDIT_SPEC) pip-audit --disable-pip --requirement $(IDP_REQUIREMENTS) --format json --output $(REPORTS_DIR)/sca.json`,
     with pinned tools `IDP_CYCLONEDX_SPEC ?= cyclonedx-bom==7.5.0` and `IDP_PIP_AUDIT_SPEC ?= pip-audit==2.10.1`,
     `UV ?= uv` and `REPORTS_DIR ?= reports`. Both recipes run `mkdir -p $(REPORTS_DIR)` first, and fail with an error
-    naming the variable when `IDP_SBOM_CMD`/`IDP_SCA_CMD` is empty (fail closed). `defaults.mk` has an include guard.
+    naming the variable when `IDP_SBOM_CMD`/`IDP_SCA_CMD` is empty (fail closed). `defaults.mk` has an include guard
+    (not exported to sub-makes).
   - Recommended inclusion is via a variable, `include $(IDP_PROFILE_DIR)/defaults.mk`, where `IDP_PROFILE_DIR` is the
     profile directory (see AC-4 `dir` and Q2). Tests stub the commands, e.g. `make sbom IDP_SBOM_CMD='echo default-sbom'`,
     and never run the real tools.
@@ -104,7 +105,8 @@ discovery mechanism that works from the installed package, and `idp profile show
 - ASSUMPTION A3: `defaultTargets` ↔ `defaults.mk` consistency is a repo test, not a runtime check.
 - ASSUMPTION A4: default tool commands run exact-pinned tools via `uv tool run --from <spec>` (overridable `*_SPEC`
   variables), so tenants need not add the tools to their dev deps, against the project's locked dependencies exported
-  with `uv export --frozen` (uv.lock and the project environment are not changed). Network is only used when the recipe
+  with `uv export --locked` (fails on a stale uv.lock; uv.lock and the project environment are not changed). Network
+  is only used when the recipe
   runs. Flags confirmed by a real run against this repo (Q4, resolved).
 - ASSUMPTION A5: `defaults.mk` preserves the tenant's `.DEFAULT_GOAL`.
 - ASSUMPTION A6: resolved profile = document + `dir`; the printed object is therefore not itself schema-valid
@@ -154,7 +156,7 @@ discovery mechanism that works from the installed package, and `idp profile show
 - Q4: Exact default commands and output files for `sbom`/`sca` (A4): `cyclonedx-py environment` vs `cyclonedx-py
   requirements` from `uv export`; `pip-audit` against the environment vs `uv export | pip-audit -r -`; output paths
   `reports/sbom.cdx.json` and `reports/sca.json`. RESOLVED (IDP-18 review round 1): `cyclonedx-py requirements` and
-  `pip-audit --disable-pip --requirement` on a hashed `uv export --frozen --all-packages` file in `$(REPORTS_DIR)`,
+  `pip-audit --disable-pip --requirement` on a hashed `uv export --locked --all-packages` file (review round 2: `--locked` instead of `--frozen`) in `$(REPORTS_DIR)`,
   tools pinned to `cyclonedx-bom==7.5.0` / `pip-audit==2.10.1` and run with `uv tool run --from`; outputs
   `reports/sbom.cdx.json` and `reports/sca.json`. Verified by one real run against this repo (not in tests; tests stub
   the commands and assert the full default lines with `make -n`).

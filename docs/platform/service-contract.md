@@ -137,7 +137,8 @@ Overridable variables (all `?=`; set them in the Makefile or on the command line
 | `UV` | `uv` |
 
 - The export (`IDP_EXPORT_CMD`, into `IDP_REQUIREMENTS`, default `$(REPORTS_DIR)/requirements.locked.txt`) uses
-  `uv export --frozen`, so uv.lock and the project environment are not changed. Network is used only when the recipes
+  `uv export --locked`: it fails if uv.lock is stale (run `uv lock`), and never changes uv.lock or the project
+  environment. Network is used only when the recipes
   run (tool download, vulnerability database), never at parse time. Names `idp-default-*` and `_idp_*` are reserved.
 - `idp profile show <name> [--json]` prints the resolved profile (`profile.yaml` plus `dir`) as YAML, or as one JSON
   line with `--json`, and exits `0`. An invalid name, unknown or invalid profile, or missing profiles directory exits

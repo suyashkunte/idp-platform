@@ -59,6 +59,7 @@ Status stays Proposed; acceptance is a human decision (IDP-18 spec, Q5).
 ### Pinned tool versions
 - The python-uv defaults run exact-pinned tools, `IDP_CYCLONEDX_SPEC ?= cyclonedx-bom==7.5.0` and
   `IDP_PIP_AUDIT_SPEC ?= pip-audit==2.10.1`, with `uv tool run --from <spec>` against the project's locked dependencies
-  (`uv export --frozen`), so uv.lock and the project environment are not changed.
+  (`uv export --locked`): the export fails if uv.lock is stale, and uv.lock and the project environment are not
+  changed.
 - Pins do not move by themselves: upgrading (for fixes or newer vulnerability matching) is a deliberate change in a
   ticket. Tenants can override the `*_SPEC` variables in the meantime.

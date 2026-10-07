@@ -40,16 +40,19 @@ So `defaults.mk` never defines `sbom`/`sca` explicitly:
 # Include guard: a second include is a no-op (no duplicate rules, no override warnings).
 ifndef _idp_python_uv_defaults
 _idp_python_uv_defaults := 1
+# Never pass the guard to sub-makes (a tenant's bare `export` would otherwise hide the defaults in `$(MAKE) sca`).
+unexport _idp_python_uv_defaults
 _idp_saved_goal := $(.DEFAULT_GOAL)
 UV ?= uv
 REPORTS_DIR ?= reports
 # Tools are pinned (override the *_SPEC variables to upgrade) and run in uv's isolated tool environments. Both scan
-# the project's locked dependencies, exported with hashes from uv.lock using --frozen, so uv.lock and the project
-# environment are not changed. Network is needed only when the recipes run (tool download, vulnerability database).
+# the project's locked dependencies, exported with hashes from uv.lock using --locked: the export fails if uv.lock is
+# stale (out of date with pyproject.toml) and never writes uv.lock or the project environment. Network is needed only
+# when the recipes run (tool download, vulnerability database).
 IDP_CYCLONEDX_SPEC ?= cyclonedx-bom==7.5.0
 IDP_PIP_AUDIT_SPEC ?= pip-audit==2.10.1
 IDP_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.locked.txt
-IDP_EXPORT_CMD ?= $(UV) export --quiet --frozen --all-packages --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_REQUIREMENTS)
+IDP_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_REQUIREMENTS)
 IDP_SBOM_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_REQUIREMENTS)
 IDP_SCA_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_PIP_AUDIT_SPEC) pip-audit --disable-pip --requirement $(IDP_REQUIREMENTS) --format json --output $(REPORTS_DIR)/sca.json
 
@@ -77,14 +80,16 @@ endif
 - Default commands (review round 1, resolves spec Q4): tools are exact-pinned (`cyclonedx-bom==7.5.0`,
   `pip-audit==2.10.1`, the current releases resolved from PyPI with `uv pip compile`) behind `IDP_CYCLONEDX_SPEC` /
   `IDP_PIP_AUDIT_SPEC`, and run with `uv tool run --from <spec>` in uv's isolated tool environments. Both scan the
-  project's locked dependencies: `uv export --frozen --all-packages` (hashed, without the project/workspace members)
+  project's locked dependencies: `uv export --locked --all-packages` (hashed, without the project/workspace members)
   into `$(IDP_REQUIREMENTS)`, then `cyclonedx-py requirements` and `pip-audit --disable-pip --requirement` on that
-  file. `--frozen` never writes uv.lock and `uv export` never syncs the environment. The export is part of
+  file. `--locked` (review round 2; `--frozen` silently scanned a stale lock) fails when uv.lock is out of date with
+  `pyproject.toml` and never writes uv.lock; `uv export` never syncs the environment. The export is part of
   `IDP_SBOM_CMD`/`IDP_SCA_CMD`, so a stubbed command runs nothing real. Verified by one real run of `make sbom` /
   `make sca` against this repo (CycloneDX 1.6 SBOM, pip-audit JSON, uv.lock unchanged).
 - Fail closed: an empty `IDP_SBOM_CMD`/`IDP_SCA_CMD` stops make with an error naming the variable (exit 2) instead of
   exiting 0 without evidence. A failing command fails the target.
-- Include guard (`ifndef _idp_python_uv_defaults`): including `defaults.mk` twice is a no-op, so no duplicate-recipe
+- Include guard (`ifndef _idp_python_uv_defaults`, then `unexport _idp_python_uv_defaults` so a tenant's bare `export`
+  does not hide the defaults from `$(MAKE) sca` sub-makes): including `defaults.mk` twice is a no-op, so no duplicate-recipe
   warnings.
 - `.DEFAULT_GOAL` save/restore keeps the tenant's first target as the default goal when the include is at the top
   (an empty restored value makes make pick the next explicit target, as documented for 3.81+).

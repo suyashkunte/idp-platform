@@ -200,8 +200,10 @@ def test_default_targets_have_recipes_in_defaults_mk() -> None:
 _MAKE_ENV_STRIPPED = frozenset(
     {
         "MAKEFLAGS",
+        "GNUMAKEFLAGS",
         "MAKELEVEL",
         "MFLAGS",
+        "MAKEFILES",
         "REPORTS_DIR",
         "UV",
         "IDP_SBOM_CMD",
@@ -287,7 +289,7 @@ def test_failing_default_command_fails_the_target(tmp_path: Path, target: str, v
 def test_default_commands_use_profile_tools_in_dry_run(tmp_path: Path) -> None:
     _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
     export = (
-        "/nonexistent/uv export --quiet --frozen --all-packages --no-emit-project --no-emit-workspace "
+        "/nonexistent/uv export --quiet --locked --all-packages --no-emit-project --no-emit-workspace "
         "--format requirements-txt --output-file reports/requirements.locked.txt"
     )
     sca = _make(tmp_path, "-n", "sca", "UV=/nonexistent/uv", stub=False)
@@ -336,6 +338,14 @@ def test_defaults_mk_needs_no_commands_at_parse_time(tmp_path: Path) -> None:
     _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
     result = _make(tmp_path, "-n", "sbom", "UV=/nonexistent/uv", stub=False)
     assert (result.returncode, result.stderr) == (0, "")
+
+
+@pytest.mark.ac("IDP-18:AC-2")
+def test_recursive_make_with_bare_export_still_gets_defaults(tmp_path: Path) -> None:
+    _tenant(tmp_path, "export\nbuild:\n\t@echo tenant-build\nouter:\n\t@$(MAKE) --no-print-directory sca\n")
+    result = _make(tmp_path, "outer")
+    assert (result.returncode, result.stderr) == (0, "")
+    assert result.stdout.splitlines()[-1] == "default-sca"
 
 
 @pytest.mark.ac("IDP-18:AC-3")
