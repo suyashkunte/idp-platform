@@ -15,5 +15,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/idp_gate"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"../../build-profiles" = "idp_gate/build_profiles"
+# Build profiles (allow-listed) ship in the sdist and the wheel via hatch_build.py (IDP-21, ADR-0012).
+[tool.hatch.build.hooks.custom]
+
+[dependency-groups]
+dev = ["hatchling>=1.25"]
