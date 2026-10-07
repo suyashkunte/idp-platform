@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -19,17 +20,18 @@ MAKE_PATH = "Makefile"
 REQUIRED_TARGETS = ("lint", "test", "test-component", "verify", "spec-trace")
 TEST_KINDS = ("smoke", "api", "e2e", "perf")
 _INCLUDE_DIRECTIVES = frozenset({"include", "-include", "sinclude"})
-# Column-0 rule line (comments already stripped, so any `#` left is an escaped `\#`): names, then `:` or `::`
-# not followed by `:` or `=` (excludes `:=`, `::=`, `:::=`).
-_RULE_LINE = re.compile(r"^(?P<names>[^\s:=][^:=]*?)\s*::?(?![:=])")
 # After the rule colon: `[export|override|private ...] VAR <op>` makes it a target-specific variable line.
 _TARGET_VARIABLE = re.compile(r"\s*(?:(?:export|override|private)\s+)*[^\s:=#;]+\s*(?::{1,3}|[+?!])?=")
-_DEFINE_START = re.compile(r"^\s*(?:(?:override|export|private)\s+)*define(?:\s|$)")
+# `define NAME` starts a block; `define := x` (a variable named `define`) does not.
+_DEFINE_START = re.compile(r"^\s*(?:(?:override|export|private)\s+)*define(?:\s|$)(?!\s*(?::{1,3}|[+?!])?=)")
 _DEFINE_END = re.compile(r"^\s*endef(?:\s|$)")
 _COMMENT = re.compile(r"(?<!\\)#")  # `\#` is a literal hash, not a comment
-# Tenant repos are untrusted (CI runs this on PRs): cap what a Makefile and its includes can make us read.
+# Tenant repos are untrusted (CI runs this on PRs): cap what a Makefile and its includes can make us read or report.
 MAX_MAKEFILE_BYTES = 1024 * 1024
 MAX_MAKEFILES = 64
+MAX_INCLUDE_WORDS = 1024  # distinct (normalised) include words queued
+MAX_INCLUDE_PROBLEMS = 20  # confinement/read violations before scanning stops
+MAX_SHOWN_WORD = 200  # characters of an include word's repr echoed in a message
 
 
 @dataclass(frozen=True)
@@ -81,13 +83,25 @@ def _include_words(line: str) -> list[str]:
     return [w for w in words[1:] if not any(c in w for c in "$*?[")]
 
 
+def _rule_end(line: str) -> int | None:
+    """Index just past the `:`/`::` of a column-0 rule line, or None (linear: no backtracking regex).
+
+    Comments are already stripped, so any `#` left is an escaped `\\#`. Names precede the first `:`, contain no `=`
+    and do not start with whitespace; `:=`, `::=` and `:::=` are assignments, not rules."""
+    colon = line.find(":")
+    if colon <= 0 or line[0].isspace() or "=" in line[:colon]:
+        return None
+    end = colon + 2 if line[colon + 1 : colon + 2] == ":" else colon + 1
+    return None if line[end : end + 1] in {":", "="} else end
+
+
 def _rule_names(line: str) -> set[str]:
     """Target names defined by a rule line (column 0); special, pattern, `$(...)` names and
     target-specific variable lines (`name: VAR = x`) are dropped."""
-    match = _RULE_LINE.match(line)
-    if not match or _TARGET_VARIABLE.match(line, match.end()):
+    end = _rule_end(line)
+    if end is None or _TARGET_VARIABLE.match(line, end):
         return set()
-    names = (n.replace("\\#", "#") for n in match.group("names").split())
+    names = (n.replace("\\#", "#") for n in line[: line.find(":")].split())
     return {n for n in names if not n.startswith(".") and "%" not in n and "$" not in n}
 
 
@@ -113,10 +127,20 @@ def _read_capped(path: Path) -> str | None:
     return None if len(data) > MAX_MAKEFILE_BYTES else data.decode("utf-8")
 
 
+def _shown(name: str) -> str:
+    """`repr(name)` for messages, truncated to MAX_SHOWN_WORD characters (untrusted input is echoed)."""
+    text = repr(name)
+    return text if len(text) <= MAX_SHOWN_WORD else text[:MAX_SHOWN_WORD] + "…"
+
+
+def _cannot_read(name: str) -> Violation:
+    return Violation(MAKE_PATH, f"cannot read {_shown(name)}")
+
+
 def _outside(word: str | None) -> Violation:
     if word is None:
         return Violation(MAKE_PATH, "Makefile resolves outside the service directory")
-    return Violation(MAKE_PATH, f"include {word!r} is outside the service directory")
+    return Violation(MAKE_PATH, f"include {_shown(word)} is outside the service directory")
 
 
 def _lexically_outside(word: str, root: Path) -> bool:
@@ -126,6 +150,8 @@ def _lexically_outside(word: str, root: Path) -> bool:
 
 def _locate(path: Path, word: str | None, root: Path) -> Path | Violation | None:
     """Real path of `path` inside `root`; a Violation if it escapes or cannot be resolved; None if not on disk."""
+    if word is not None and "\x00" in word:  # the OS cannot name such a path (resolve would raise ValueError)
+        return _cannot_read(word)
     if word is not None and _lexically_outside(word, root):
         return _outside(word)
     try:
@@ -133,53 +159,90 @@ def _locate(path: Path, word: str | None, root: Path) -> Path | Violation | None
     except FileNotFoundError:
         return None
     except (OSError, RuntimeError):
-        return Violation(MAKE_PATH, f"cannot read {word or MAKE_PATH!r}")
+        return _cannot_read(word or MAKE_PATH)
     return resolved if resolved.is_relative_to(root) else _outside(word)
 
 
 def _load_makefile(resolved: Path, name: str) -> list[str] | Violation:
     """Parsed lines of a confined regular file, or a Violation (not a regular file, unreadable, too large)."""
     if not resolved.is_file():  # directories, FIFOs, devices: never opened
-        return Violation(MAKE_PATH, f"cannot read {name!r}")
+        return _cannot_read(name)
     try:
         text = _read_capped(resolved)
     except (OSError, UnicodeDecodeError):
-        return Violation(MAKE_PATH, f"cannot read {name!r}")
+        return _cannot_read(name)
     if text is None:
-        return Violation(MAKE_PATH, f"{name!r} exceeds 1 MiB")
+        return Violation(MAKE_PATH, f"{_shown(name)} exceeds 1 MiB")
     return _parsed_lines(text)
+
+
+@dataclass
+class _Scanner:
+    """Mutable state of one `makefile_targets` scan: FIFO queue (line order), caps and collected results."""
+
+    root: Path
+    base: Path
+    targets: set[str] = field(default_factory=set)
+    problems: list[Violation] = field(default_factory=list)
+    pending: deque[tuple[Path, str | None]] = field(default_factory=deque)
+    words: set[str] = field(default_factory=set)
+    visited: set[Path] = field(default_factory=set)
+    stopped: bool = False
+
+    def stop(self, message: str) -> None:
+        if not self.stopped:
+            self.problems.append(Violation(MAKE_PATH, message))
+            self.stopped = True
+
+    def problem(self, violation: Violation) -> None:
+        if len(self.problems) >= MAX_INCLUDE_PROBLEMS:
+            self.stop(f"too many include problems (limit {MAX_INCLUDE_PROBLEMS})")
+        elif not self.stopped:
+            self.problems.append(violation)
+
+    def queue(self, word: str) -> None:
+        """Queue an include word once per normalised spelling; stop past MAX_INCLUDE_WORDS distinct words."""
+        key = os.path.normpath(word)
+        if self.stopped or key in self.words:
+            return
+        if len(self.words) >= MAX_INCLUDE_WORDS:
+            self.stop(f"too many include words (limit {MAX_INCLUDE_WORDS})")
+            return
+        self.words.add(key)
+        self.pending.append((self.base / word, word))
+
+    def visit(self, path: Path, word: str | None) -> None:
+        located = _locate(path, word, self.root)
+        if located is None or located in self.visited:
+            return
+        if isinstance(located, Violation):
+            self.problem(located)
+            return
+        if len(self.visited) >= MAX_MAKEFILES:
+            self.stop(f"too many included files (limit {MAX_MAKEFILES})")
+            return
+        self.visited.add(located)
+        lines = _load_makefile(located, word or MAKE_PATH)
+        if isinstance(lines, Violation):
+            self.problem(lines)
+            return
+        for line in lines:
+            self.targets |= _rule_names(line)
+            for included in _include_words(line):
+                self.queue(included)
 
 
 def makefile_targets(makefile: Path) -> MakefileScan:
     """Targets defined by rule lines in `makefile` and its literal includes. Static parsing only; make never runs.
 
-    Reads are confined to the Makefile's directory (real paths), capped at MAX_MAKEFILE_BYTES per file and
-    MAX_MAKEFILES files; problems are returned as violations instead of raising."""
-    root = makefile.parent.resolve()
-    targets: set[str] = set()
-    problems: list[Violation] = []
-    pending: list[tuple[Path, str | None]] = [(makefile, None)]
-    visited: set[Path] = set()
-    while pending:
-        path, word = pending.pop()
-        located = _locate(path, word, root)
-        if located is None or located in visited:
-            continue
-        if isinstance(located, Violation):
-            problems.append(located)
-            continue
-        if len(visited) >= MAX_MAKEFILES:
-            problems.append(Violation(MAKE_PATH, f"too many included files (limit {MAX_MAKEFILES})"))
-            break
-        visited.add(located)
-        lines = _load_makefile(located, word or MAKE_PATH)
-        if isinstance(lines, Violation):
-            problems.append(lines)
-            continue
-        for line in lines:
-            pending.extend((makefile.parent / w, w) for w in _include_words(line))
-            targets |= _rule_names(line)
-    return MakefileScan(frozenset(targets), tuple(problems))
+    Reads are confined to the Makefile's directory (real paths), capped at MAX_MAKEFILE_BYTES per file,
+    MAX_MAKEFILES files, MAX_INCLUDE_WORDS distinct include words and MAX_INCLUDE_PROBLEMS problems; problems are
+    returned as violations instead of raising. Includes are scanned in line order (breadth-first)."""
+    scanner = _Scanner(root=makefile.parent.resolve(), base=makefile.parent)
+    scanner.pending.append((makefile, None))
+    while scanner.pending and not scanner.stopped:
+        scanner.visit(*scanner.pending.popleft())
+    return MakefileScan(frozenset(scanner.targets), tuple(scanner.problems))
 
 
 def check_make_contract(doc: Any, makefile: Path) -> list[Violation]:

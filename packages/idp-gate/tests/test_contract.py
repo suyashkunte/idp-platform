@@ -248,6 +248,31 @@ def test_escaped_hash_does_not_start_a_comment(tmp_path: Path) -> None:
     assert contract.makefile_targets(makefile).targets == {"lint#1", "lint", "verify"}
 
 
+@pytest.mark.ac("IDP-17:AC-3")
+def test_variable_named_define_does_not_start_a_define_block(tmp_path: Path) -> None:
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("define := 1\nlint:\ndefine += 2\nexport define ?= 3\ndefine = 4\nverify:\n")
+    assert contract.makefile_targets(makefile).targets == {"lint", "verify"}
+
+
+@pytest.mark.ac("IDP-17:AC-3")
+def test_rule_colon_edge_cases(tmp_path: Path) -> None:
+    makefile = tmp_path / "Makefile"
+    makefile.write_text(
+        "a::=b\nc:::=d\ne := f\ng:=h\n::i\n=j: k\nl=m: n\ndbl::\nsgl:deps\nsp  :  deps\nlast:\nend::x\n"
+    )
+    assert contract.makefile_targets(makefile).targets == {"dbl", "sgl", "sp", "last", "end"}
+
+
+@pytest.mark.ac("IDP-17:AC-3")
+def test_long_lines_without_colon_are_parsed_in_linear_time(tmp_path: Path) -> None:
+    # A backtracking rule regex is quadratic here (hours for 200k chars); the scan must finish promptly.
+    makefile = tmp_path / "Makefile"
+    padding = " " * 200_000
+    makefile.write_text(f"a{padding}x\nb{padding}x = y\nlint:\nc{padding}d: e\n")
+    assert contract.makefile_targets(makefile).targets == {"lint", "c", "d"}
+
+
 def _make_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> list[str]:
     """Run `idp validate --json` in `tmp_path`; assert one JSON object and exit 1; return the Makefile messages."""
     monkeypatch.chdir(tmp_path)
@@ -343,13 +368,83 @@ def test_unreadable_files_are_violations_not_tracebacks(
     (tmp_path / "adir.mk").mkdir()
     with (tmp_path / "Makefile").open("a") as fh:
         fh.write("include latin1.mk\ninclude loop.mk\ninclude adir.mk\n")
-    assert sorted(_make_messages(tmp_path, monkeypatch, capsys)) == [
-        "cannot read 'adir.mk'",
+    assert _make_messages(tmp_path, monkeypatch, capsys) == [  # scan (line) order
         "cannot read 'latin1.mk'",
         "cannot read 'loop.mk'",
+        "cannot read 'adir.mk'",
     ]
     (tmp_path / "Makefile").write_bytes(b"lint:\n\xff\n")
     assert _make_messages(tmp_path, monkeypatch, capsys) == ["cannot read 'Makefile'"]
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+@pytest.mark.ac("IDP-17:AC-4")
+def test_nul_byte_in_include_word_is_a_violation_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path)
+    with (tmp_path / "Makefile").open("a") as fh:
+        fh.write("include a\x00b.mk\n")
+    assert _make_messages(tmp_path, monkeypatch, capsys) == ["cannot read 'a\\x00b.mk'"]
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+def test_repeated_include_words_are_reported_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path)
+    with (tmp_path / "Makefile").open("a") as fh:
+        fh.write("include" + " /x" * 5000 + "\n" + "include" + " /x" * 5000 + "\n")
+    assert _make_messages(tmp_path, monkeypatch, capsys) == ["include '/x' is outside the service directory"]
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+def test_include_problems_are_capped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path)
+    limit = contract.MAX_INCLUDE_PROBLEMS
+    words = [f"/x{i}" for i in range(500)]  # below MAX_INCLUDE_WORDS, far above the problem cap
+    with (tmp_path / "Makefile").open("a") as fh:
+        fh.write(f"include {' '.join(words)}\n")
+    expected = [f"include {w!r} is outside the service directory" for w in words[:limit]]
+    assert _make_messages(tmp_path, monkeypatch, capsys) == [*expected, f"too many include problems (limit {limit})"]
+    _write_makefile(tmp_path)
+    with (tmp_path / "Makefile").open("a") as fh:
+        fh.write(f"include {' '.join(words[:limit])}\n")  # exactly at the cap: no extra message
+    assert _make_messages(tmp_path, monkeypatch, capsys) == expected
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+def test_too_many_include_words_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path)
+    words = [f"missing{i}.mk" for i in range(contract.MAX_INCLUDE_WORDS + 1)]  # not on disk: otherwise skipped
+    with (tmp_path / "Makefile").open("a") as fh:
+        fh.write(f"-include {' '.join(words)}\n")
+    assert _make_messages(tmp_path, monkeypatch, capsys) == ["too many include words (limit 1024)"]
+    _write_makefile(tmp_path)
+    with (tmp_path / "Makefile").open("a") as fh:
+        fh.write(f"-include {' '.join(words[:-1])} ./missing0.mk\n")  # 1024 distinct words (./ normalised) is fine
+    assert contract.makefile_targets(tmp_path / "Makefile").violations == ()
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+def test_long_include_word_is_truncated_in_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path)
+    word = "/" + "a" * 5000
+    with (tmp_path / "Makefile").open("a") as fh:
+        fh.write(f"include {word}\n")
+    shown = repr(word)[: contract.MAX_SHOWN_WORD] + "…"
+    assert _make_messages(tmp_path, monkeypatch, capsys) == [f"include {shown} is outside the service directory"]
 
 
 @pytest.mark.ac("IDP-17:AC-2")
