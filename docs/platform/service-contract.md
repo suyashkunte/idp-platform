@@ -69,6 +69,47 @@ spec:
 | `make test-smoke` / `test-api` / `test-e2e` / `test-perf` | when `tests.*: true` | run against `BASE_URL`; write JUnit + `summary.json` into `REPORTS_DIR` |
 | `make sbom` / `make sca` | no | the build profile provides defaults |
 
+### How `idp validate` checks it
+- `idp validate` with no argument validates `./idp.yaml`; `idp validate path/to/file.yaml` validates that file. The
+  Makefile checked is always `Makefile` in the same directory as the validated file (`makefile` and `GNUmakefile` are not
+  recognised).
+- Checks, in this order: the `idp-service.v1` schema, then the Make contract: every target marked "yes" above
+  (`lint`, `test`, `test-component`, `verify`, `spec-trace`), then `test-<kind>` for each of `smoke`, `api`, `e2e`,
+  `perf` whose `spec.tests.<kind>` is `true`. Recommended targets (`verify-fast`, `format`) are not checked. Every missing
+  target is reported, not only the first. A missing Makefile is reported as a single `Makefile not found` violation.
+  Make checks also run when the schema check fails, but are skipped if the YAML cannot be parsed into a mapping.
+- Targets are found by **static parsing**; `make` is never executed. A target counts when a line at column 0 names it
+  before `:` or `::` (not `:=`, `::=`, `:::=`); comments after an unescaped `#` are ignored (`\#` is a literal hash).
+  Not counted: names listed only in `.PHONY:` or other special targets starting with `.`, pattern rules (`%`), names
+  containing `$(...)`, variable assignments, target-specific variable lines (`name: VAR = x`, also with `:=`, `?=`,
+  `+=`, `!=`, `export`/`override`), lines inside `define ... endef` (skipped, nesting supported), recipe (tab-indented)
+  and indented lines. `include`, `-include` and `sinclude` are followed recursively for literal paths relative to the
+  Makefile's directory; words with `$` or glob characters and files not on disk are skipped. Limitations: conditionals
+  (`ifeq`/`ifdef`/...) are not evaluated (targets in either branch count); line continuations in rule lines and
+  variable expansion are not interpreted, so define required targets as plain rules.
+- Reads are **confined to the service directory** (the directory of the validated `idp.yaml`): absolute include paths,
+  includes escaping it via `..`, and files whose real path (after symlinks) is outside it are not read and are reported,
+  e.g. `include '../shared.mk' is outside the service directory` or `Makefile resolves outside the service directory`.
+  Each file is read up to 1 MiB (`'<name>' exceeds 1 MiB`) and at most 64 files are read
+  (`too many included files (limit 64)`). Unreadable, non-UTF-8 or symlink-loop files, and include words containing a
+  NUL byte, give `cannot read '<name>'`. Repeated include words are checked once; more than 1024 distinct include words
+  give `too many include words (limit 1024)`, and after 20 problems scanning stops with
+  `too many include problems (limit 20)`. Words echoed in messages are truncated to 200 characters (`…`).
+  Includes outside the service directory, such as a shared `../common.mk` in a monorepo, are rejected even with
+  `-include`; copy shared targets into the service directory instead.
+  When any of these occur, only these problems are reported (the target list would be incomplete), in line order.
+- Text output: `<file>: valid (idp-service.v1.json)`, or one line per violation, e.g.
+  `idp.yaml: Makefile: missing required target 'lint'`.
+- `--json` prints exactly one JSON line with keys `file`, `valid`, `schema`, `violations` (each `{path, message}`;
+  schema violations use the dotted field path, Make violations use `Makefile`):
+
+```json
+{"file": "idp.yaml", "valid": false, "schema": "idp-service.v1", "violations": [{"path": "Makefile", "message": "missing required target 'test-component'"}]}
+```
+
+- Exit codes: `0` valid, `1` violations found, `2` file not found or usage error (nothing on stdout, message on stderr,
+  also with `--json`).
+
 ## Evidence formats (I3)
 JUnit XML · Cobertura XML · SARIF 2.1 · CycloneDX JSON · `summary.json` (`test-summary.v1`: totals, pass rate by tag, failed tests with
 `trace_id`). Tags are `p0`, `p1`, `critical`, `smoke`, `quarantine`, plus `ac:<KEY>:AC-n` for traceability. Non-Python stacks emit tags in test names
