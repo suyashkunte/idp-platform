@@ -9,10 +9,13 @@ IDP_SBOM_CMD ?= $(UV) run --with cyclonedx-bom cyclonedx-py environment --output
 IDP_SCA_CMD ?= $(UV) run --with pip-audit pip-audit --format json --output $(REPORTS_DIR)/sca.json
 
 .PHONY: idp-default-sbom idp-default-sca
+# An empty command fails (fail closed) instead of silently producing no evidence.
 idp-default-sbom:
+	$(if $(strip $(IDP_SBOM_CMD)),,$(error IDP_SBOM_CMD is empty: set it or define your own sbom target))
 	@mkdir -p $(REPORTS_DIR)
 	$(IDP_SBOM_CMD)
 idp-default-sca:
+	$(if $(strip $(IDP_SCA_CMD)),,$(error IDP_SCA_CMD is empty: set it or define your own sca target))
 	@mkdir -p $(REPORTS_DIR)
 	$(IDP_SCA_CMD)
 

@@ -246,6 +246,26 @@ def test_unknown_target_still_fails_with_no_rule(tmp_path: Path) -> None:
 
 
 @pytest.mark.ac("IDP-18:AC-2")
+@pytest.mark.parametrize(("target", "variable"), [("sbom", "IDP_SBOM_CMD"), ("sca", "IDP_SCA_CMD")])
+def test_empty_default_command_fails_closed(tmp_path: Path, target: str, variable: str) -> None:
+    _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    result = _make(tmp_path, target, f"{variable}=", stub=False)
+    assert result.returncode == 2
+    assert f"{variable} is empty: set it or define your own {target} target" in result.stderr
+    assert result.stdout == ""
+    assert not (tmp_path / "reports").exists()
+
+
+@pytest.mark.ac("IDP-18:AC-2")
+@pytest.mark.parametrize(("target", "variable"), [("sbom", "IDP_SBOM_CMD"), ("sca", "IDP_SCA_CMD")])
+def test_failing_default_command_fails_the_target(tmp_path: Path, target: str, variable: str) -> None:
+    _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
+    result = _make(tmp_path, target, f"{variable}=false", stub=False)
+    assert result.returncode == 2
+    assert f"idp-default-{target}] Error 1" in result.stderr  # make 3.81: [t]; make 4.x: [file:line: t]
+
+
+@pytest.mark.ac("IDP-18:AC-2")
 def test_default_commands_use_profile_tools_in_dry_run(tmp_path: Path) -> None:
     _tenant(tmp_path, "build:\n\t@echo tenant-build\n")
     sca = _make(tmp_path, "-n", "sca", "UV=/nonexistent/uv", stub=False)
