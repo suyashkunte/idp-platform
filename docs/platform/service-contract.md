@@ -91,8 +91,13 @@ spec:
   includes escaping it via `..`, and files whose real path (after symlinks) is outside it are not read and are reported,
   e.g. `include '../shared.mk' is outside the service directory` or `Makefile resolves outside the service directory`.
   Each file is read up to 1 MiB (`'<name>' exceeds 1 MiB`) and at most 64 files are read
-  (`too many included files (limit 64)`). Unreadable, non-UTF-8 or symlink-loop files give `cannot read '<name>'`.
-  When any of these occur, only these problems are reported (the target list would be incomplete).
+  (`too many included files (limit 64)`). Unreadable, non-UTF-8 or symlink-loop files, and include words containing a
+  NUL byte, give `cannot read '<name>'`. Repeated include words are checked once; more than 1024 distinct include words
+  give `too many include words (limit 1024)`, and after 20 problems scanning stops with
+  `too many include problems (limit 20)`. Words echoed in messages are truncated to 200 characters (`…`).
+  Includes outside the service directory, such as a shared `../common.mk` in a monorepo, are rejected even with
+  `-include`; copy shared targets into the service directory instead.
+  When any of these occur, only these problems are reported (the target list would be incomplete), in line order.
 - Text output: `<file>: valid (idp-service.v1.json)`, or one line per violation, e.g.
   `idp.yaml: Makefile: missing required target 'lint'`.
 - `--json` prints exactly one JSON line with keys `file`, `valid`, `schema`, `violations` (each `{path, message}`;

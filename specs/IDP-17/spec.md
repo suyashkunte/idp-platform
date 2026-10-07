@@ -111,6 +111,13 @@ check and an opt-in `--json` flag. Catalog consistency and tighten-only override
   bodies are not rules; `\#` is not a comment; conditionals are not evaluated).
 - ASSUMPTION A11: literal include paths relative to the Makefile directory; `$`/glob words and missing files skipped;
   reads confined to the service root, capped at 1 MiB per file and 64 files; read problems are violations.
+  Includes outside the service root (e.g. a shared `../common.mk` in a monorepo) are rejected even with `-include`.
+  Include words are deduplicated (normalised spelling), at most 1024 distinct words (`too many include words
+  (limit 1024)`) and 20 problems (`too many include problems (limit 20)`), then scanning stops; words with a NUL byte
+  give `cannot read '<word>'`; echoed words are truncated to 200 characters of their repr plus `…`; includes are
+  scanned in line order (FIFO). Documented limitations (not addressed): the check-then-open sequence is racy (TOCTOU) -
+  a file swapped for an outside symlink between resolve and open could be read; an in-repo symlink to an outside path
+  still reveals one bit (whether that outside path exists) through the violation reported.
 - ASSUMPTION A12: human-readable output format unchanged (prefix `<file>: ` on every violation line).
 - ASSUMPTION A13: the IDP-8 CLI test gets a Makefile fixture; no other existing test changes.
 
@@ -159,6 +166,11 @@ Changes after code review (spec still DRAFT, auto mode), all recorded in A10/A11
 - A11: reads confined to the service root (absolute / escaping / symlinked-outside includes and an outside Makefile are
   violations), 1 MiB per-file and 64-file caps, unreadable / non-UTF-8 / symlink-loop files reported as
   `cannot read '<name>'` instead of a traceback; on any such problem only those violations are reported.
+- A10: rule lines are recognised without a backtracking regex (linear time on long lines); `define := x` and other
+  assignments to a variable named `define` do not start a `define` block.
+- A11 (second review): NUL-byte include words are `cannot read` violations (no traceback); include words deduplicated
+  and capped (1024 words, 20 problems); echoed words truncated to 200 characters; FIFO (line-order) scanning; TOCTOU
+  and the symlink existence oracle recorded as limitations.
 - Python API: `makefile_targets()` now returns `MakefileScan(targets, violations)` instead of `set[str]`.
 
 ## Traceability
@@ -166,7 +178,7 @@ Changes after code review (spec still DRAFT, auto mode), all recorded in A10/A11
 |----|---------------|
 | AC-1 | packages/idp-gate/tests/test_contract.py::test_validate_without_argument_uses_cwd_idp_yaml_and_exits_0, packages/idp-gate/tests/test_contract.py::test_makefile_targets_parses_rules_includes_and_ignores_non_rules |
 | AC-2 | packages/idp-gate/tests/test_contract.py::test_enabled_test_kind_without_target_is_reported, packages/idp-gate/tests/test_contract.py::test_disabled_test_kind_does_not_require_target, packages/idp-gate/tests/test_contract.py::test_non_boolean_or_non_mapping_tests_only_give_schema_violations |
-| AC-3 | packages/idp-gate/tests/test_contract.py::test_every_missing_required_target_is_listed, packages/idp-gate/tests/test_contract.py::test_phony_only_and_pattern_rules_do_not_define_targets, packages/idp-gate/tests/test_contract.py::test_make_checks_run_with_schema_violations, packages/idp-gate/tests/test_contract.py::test_target_detection_never_runs_make, packages/idp-gate/tests/test_contract.py::test_target_specific_variable_lines_do_not_define_targets, packages/idp-gate/tests/test_contract.py::test_define_bodies_are_skipped_including_nested_ones, packages/idp-gate/tests/test_contract.py::test_escaped_hash_does_not_start_a_comment |
-| AC-4 | packages/idp-gate/tests/test_contract.py::test_json_valid_output_and_exit_0, packages/idp-gate/tests/test_contract.py::test_json_invalid_output_lists_violations_and_exits_1, packages/idp-gate/tests/test_contract.py::test_json_missing_file_exits_2_with_empty_stdout |
+| AC-3 | packages/idp-gate/tests/test_contract.py::test_every_missing_required_target_is_listed, packages/idp-gate/tests/test_contract.py::test_phony_only_and_pattern_rules_do_not_define_targets, packages/idp-gate/tests/test_contract.py::test_make_checks_run_with_schema_violations, packages/idp-gate/tests/test_contract.py::test_target_detection_never_runs_make, packages/idp-gate/tests/test_contract.py::test_target_specific_variable_lines_do_not_define_targets, packages/idp-gate/tests/test_contract.py::test_define_bodies_are_skipped_including_nested_ones, packages/idp-gate/tests/test_contract.py::test_escaped_hash_does_not_start_a_comment, packages/idp-gate/tests/test_contract.py::test_variable_named_define_does_not_start_a_define_block, packages/idp-gate/tests/test_contract.py::test_rule_colon_edge_cases, packages/idp-gate/tests/test_contract.py::test_long_lines_without_colon_are_parsed_in_linear_time |
+| AC-4 | packages/idp-gate/tests/test_contract.py::test_json_valid_output_and_exit_0, packages/idp-gate/tests/test_contract.py::test_json_invalid_output_lists_violations_and_exits_1, packages/idp-gate/tests/test_contract.py::test_json_missing_file_exits_2_with_empty_stdout, packages/idp-gate/tests/test_contract.py::test_nul_byte_in_include_word_is_a_violation_not_a_traceback |
 | AC-5 | packages/idp-gate/tests/test_contract.py::test_no_idp_yaml_in_cwd_exits_2_with_not_found_message |
-| AC-6 | packages/idp-gate/tests/test_contract.py::test_missing_makefile_is_single_violation, packages/idp-gate/tests/test_contract.py::test_include_outside_service_directory_is_a_violation, packages/idp-gate/tests/test_contract.py::test_symlinked_include_outside_service_directory_is_a_violation, packages/idp-gate/tests/test_contract.py::test_makefile_symlinked_outside_service_directory_is_a_violation, packages/idp-gate/tests/test_contract.py::test_oversized_makefile_or_include_is_a_violation, packages/idp-gate/tests/test_contract.py::test_too_many_included_files_is_a_violation, packages/idp-gate/tests/test_contract.py::test_unreadable_files_are_violations_not_tracebacks |
+| AC-6 | packages/idp-gate/tests/test_contract.py::test_missing_makefile_is_single_violation, packages/idp-gate/tests/test_contract.py::test_include_outside_service_directory_is_a_violation, packages/idp-gate/tests/test_contract.py::test_symlinked_include_outside_service_directory_is_a_violation, packages/idp-gate/tests/test_contract.py::test_makefile_symlinked_outside_service_directory_is_a_violation, packages/idp-gate/tests/test_contract.py::test_oversized_makefile_or_include_is_a_violation, packages/idp-gate/tests/test_contract.py::test_too_many_included_files_is_a_violation, packages/idp-gate/tests/test_contract.py::test_unreadable_files_are_violations_not_tracebacks, packages/idp-gate/tests/test_contract.py::test_nul_byte_in_include_word_is_a_violation_not_a_traceback, packages/idp-gate/tests/test_contract.py::test_repeated_include_words_are_reported_once, packages/idp-gate/tests/test_contract.py::test_include_problems_are_capped, packages/idp-gate/tests/test_contract.py::test_too_many_include_words_is_a_violation, packages/idp-gate/tests/test_contract.py::test_long_include_word_is_truncated_in_messages |
