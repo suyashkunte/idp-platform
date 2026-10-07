@@ -29,7 +29,7 @@ Exact human diff (apply on this branch, commit as `IDP-12: pin workflow runners 
 --- a/.github/workflows/platform-ci.yml
 +++ b/.github/workflows/platform-ci.yml
 @@ -17,7 +17,7 @@ concurrency:
- 
+
  jobs:
    verify:
 -    runs-on: ubuntu-latest
@@ -40,7 +40,7 @@ Exact human diff (apply on this branch, commit as `IDP-12: pin workflow runners 
 --- a/.github/workflows/oidc-smoke.yml
 +++ b/.github/workflows/oidc-smoke.yml
 @@ -14,7 +14,7 @@ permissions:
- 
+
  jobs:
    assume-role:
 -    runs-on: ubuntu-latest
