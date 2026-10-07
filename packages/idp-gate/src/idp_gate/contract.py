@@ -15,6 +15,7 @@ from jsonschema import Draft202012Validator
 SCHEMA_NAME = "idp-service.v1.json"
 MAKE_PATH = "Makefile"
 REQUIRED_TARGETS = ("lint", "test", "test-component", "verify", "spec-trace")
+TEST_KINDS = ("smoke", "api", "e2e", "perf")
 _INCLUDE_DIRECTIVES = frozenset({"include", "-include", "sinclude"})
 # Column-0 rule line: names, then `:` or `::` not followed by `:` or `=` (excludes `:=`, `::=`, `:::=`).
 _RULE_LINE = re.compile(r"^(?P<names>[^\s:=#][^:=#]*?)\s*::?(?![:=])")
@@ -92,7 +93,21 @@ def check_make_contract(doc: Any, makefile: Path) -> list[Violation]:
     if not makefile.is_file():
         return [Violation(MAKE_PATH, "Makefile not found")]
     targets = makefile_targets(makefile)
-    return [Violation(MAKE_PATH, f"missing required target '{t}'") for t in REQUIRED_TARGETS if t not in targets]
+    violations = [Violation(MAKE_PATH, f"missing required target '{t}'") for t in REQUIRED_TARGETS if t not in targets]
+    return violations + [
+        Violation(MAKE_PATH, f"missing target 'test-{k}' (required because spec.tests.{k} is true)")
+        for k in _enabled_test_kinds(doc)
+        if f"test-{k}" not in targets
+    ]
+
+
+def _enabled_test_kinds(doc: Any) -> list[str]:
+    """Kinds whose `spec.tests.<kind>` is literally `true`; non-mapping `spec`/`tests` are ignored."""
+    spec = doc.get("spec") if isinstance(doc, dict) else None
+    tests = spec.get("tests") if isinstance(spec, dict) else None
+    if not isinstance(tests, dict):
+        return []
+    return [k for k in TEST_KINDS if tests.get(k) is True]
 
 
 def validate_service(path: Path) -> list[Violation]:
