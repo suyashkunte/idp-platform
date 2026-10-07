@@ -106,8 +106,9 @@ twice. All of this has to be fixed before S5 uses the `idp-gate` wheel. Parent e
 - No secrets: `defaults.mk`, `hatch_build.py` and the docs contain no credentials. The allow-list keeps `.env` and
   other dotfiles out of the wheel and the sdist, and the existing gitleaks pre-commit hook still applies.
 - No protected path changes (root `Makefile`, root `pyproject.toml`, `.github/**`, `infra/**`, plugin hooks,
-  `.claude-plugin/**`). No new runtime dependencies. `uv.lock` unchanged. `packages/idp-gate/pyproject.toml`
-  dependencies unchanged.
+  `.claude-plugin/**`). No new runtime dependencies. `uv.lock` changes only to add `hatchling` (and its
+  dependencies) for idp-gate's dev group, so mypy strict sees real hatchling types (plan.md).
+  `packages/idp-gate/pyproject.toml` runtime dependencies unchanged.
 - Quality bars unchanged: mypy strict (which also checks `packages/idp-gate/hatch_build.py`), ruff, bandit, coverage
   >= 85 %, diff-cover >= 80 %.
 
