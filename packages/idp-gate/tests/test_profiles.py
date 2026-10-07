@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tomllib
 import zipfile
 from importlib import resources
@@ -451,6 +452,42 @@ def test_built_wheel_contains_build_profiles(tmp_path: Path) -> None:
         "idp_gate/schemas/build-profile.v1.json",
     }
     assert sorted(expected - names) == []
+
+
+@pytest.mark.ac("IDP-18:AC-4")
+def test_installed_wheel_resolves_packaged_python_uv(tmp_path: Path) -> None:
+    if shutil.which("uv") is None:
+        pytest.skip("uv is not installed")
+    dist = tmp_path / "dist"
+    build = subprocess.run(
+        ["uv", "build", "--wheel", "--offline", "--out-dir", str(dist), "packages/idp-gate"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+    [wheel] = sorted(dist.glob("idp_gate-*.whl"))
+    site = tmp_path.resolve() / "site"
+    zipfile.ZipFile(wheel).extractall(site)
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); import idp_gate; from idp_gate.cli import main; "
+        "print(idp_gate.__file__, file=sys.stderr); raise SystemExit(main(['profile', 'show', 'python-uv', '--json']))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", code, str(site)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == f"{site / 'idp_gate' / '__init__.py'}\n"  # the wheel copy, not the editable install
+    shown = json.loads(result.stdout)
+    assert shown["name"] == "python-uv"
+    assert shown["dir"] == str(site / "idp_gate" / "build_profiles" / "python-uv")
 
 
 # --- AC-5: exit 2 with the profile name and the reason ------------------------------------------------------------
