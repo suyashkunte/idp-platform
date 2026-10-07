@@ -1,5 +1,6 @@
-"""idp-gate build hook: ship allow-listed build profiles in the sdist and the wheel (IDP-21, ADR-0012)."""
+"""idp-gate build hook: ship allow-listed build profiles in the sdist and the wheel (IDP-21, IDP-24, ADR-0012)."""
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +38,12 @@ def _is_allowed(path: Path, rel: Path) -> bool:
 
 
 def select_profile_files(source: Path) -> list[Path]:
-    """Sorted relative paths of the allow-listed profile files; fails closed if no `*/profile.yaml` is selected."""
-    selected = sorted(rel for path in source.rglob("*") if _is_allowed(path, rel := path.relative_to(source)))
+    """Sorted relative paths of the allow-listed profile files; fails closed if no `*/profile.yaml` is selected.
+
+    The walk never descends into symlinked directories (IDP-24); file symlinks are rejected by `_is_allowed`.
+    """
+    paths = (Path(dirpath) / name for dirpath, _, filenames in os.walk(source, followlinks=False) for name in filenames)
+    selected = sorted(rel for path in paths if _is_allowed(path, rel := path.relative_to(source)))
     if not any(len(rel.parts) == 2 and rel.name == "profile.yaml" for rel in selected):
         raise RuntimeError(f"idp-gate build: no */profile.yaml selected in {source}")
     return selected
