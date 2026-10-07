@@ -4,7 +4,7 @@ setup:
   - name: Install Python
     run: uv python install
   - name: Sync dependencies
-    run: uv sync --frozen
+    run: uv sync --locked
 defaultTargets:
   - sbom
   - sca

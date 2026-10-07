@@ -49,11 +49,15 @@ REPORTS_DIR ?= reports
 # the project's locked dependencies, exported with hashes from uv.lock using --locked: the export fails if uv.lock is
 # stale (out of date with pyproject.toml) and never writes uv.lock or the project environment. Network is needed only
 # when the recipes run (tool download, vulnerability database).
+# The SBOM describes what ships (runtime dependencies, --no-dev); SCA audits all groups, dev included, because dev
+# tools run in CI.
 IDP_CYCLONEDX_SPEC ?= cyclonedx-bom==7.5.0
 IDP_PIP_AUDIT_SPEC ?= pip-audit==2.10.1
 IDP_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.locked.txt
 IDP_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_REQUIREMENTS)
-IDP_SBOM_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_REQUIREMENTS)
+IDP_SBOM_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.sbom.txt
+IDP_SBOM_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-dev --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_SBOM_REQUIREMENTS)
+IDP_SBOM_CMD ?= $(IDP_SBOM_EXPORT_CMD) && $(UV) tool run --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_SBOM_REQUIREMENTS)
 IDP_SCA_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_PIP_AUDIT_SPEC) pip-audit --disable-pip --requirement $(IDP_REQUIREMENTS) --format json --output $(REPORTS_DIR)/sca.json
 
 .PHONY: idp-default-sbom idp-default-sca
@@ -86,6 +90,12 @@ endif
   `pyproject.toml` and never writes uv.lock; `uv export` never syncs the environment. The export is part of
   `IDP_SBOM_CMD`/`IDP_SCA_CMD`, so a stubbed command runs nothing real. Verified by one real run of `make sbom` /
   `make sca` against this repo (CycloneDX 1.6 SBOM, pip-audit JSON, uv.lock unchanged).
+- SBOM/SCA split (reviewer decision): the SBOM describes what ships, so it has its own export,
+  `IDP_SBOM_EXPORT_CMD` (`--no-dev`, into `IDP_SBOM_REQUIREMENTS` = `$(REPORTS_DIR)/requirements.sbom.txt`). SCA keeps
+  `IDP_EXPORT_CMD` (all groups, dev included, because dev tools run in CI). Both keep `--locked`. For this repo, the
+  real SBOM has 7 components (idp-gate's runtime closure) instead of 41. `make sca` deliberately fails on any finding
+  until the policy/gate engine decides (severity thresholds, expiring waivers); SCA audits the CI platform only
+  (Linux/CPython).
 - Fail closed: an empty `IDP_SBOM_CMD`/`IDP_SCA_CMD` stops make with an error naming the variable (exit 2) instead of
   exiting 0 without evidence. A failing command fails the target.
 - Include guard (`ifndef _idp_python_uv_defaults`, then `unexport _idp_python_uv_defaults` so a tenant's bare `export`
@@ -103,7 +113,7 @@ endif
 ## Changes
 | File | Change |
 |------|--------|
-| build-profiles/python-uv/profile.yaml | New. `name: python-uv`, `description`, `setup` (`{name, run}` steps: install Python via `uv python install`, `uv sync --frozen`), `defaultTargets: [sbom, sca]`, `coverage: {format: cobertura}`, `sbom: {tool: cyclonedx-py, format: cyclonedx-json}`, `sca: {tool: pip-audit}`. (AC-1) |
+| build-profiles/python-uv/profile.yaml | New. `name: python-uv`, `description`, `setup` (`{name, run}` steps: install Python via `uv python install`, `uv sync --locked` (reviewer decision, was `--frozen`)), `defaultTargets: [sbom, sca]`, `coverage: {format: cobertura}`, `sbom: {tool: cyclonedx-py, format: cyclonedx-json}`, `sca: {tool: pip-audit}`. (AC-1) |
 | build-profiles/python-uv/defaults.mk | New, as sketched above. (AC-2, AC-3) |
 | build-profiles/python-uv/agent-notes.md | New. Sections `## pytest idioms` (layout `tests/` per package, `test_*.py`, plain asserts with literal expected values, `pytest.raises`, `parametrize`, `capsys`, no sleeps/network), `## AC tagging` (`@pytest.mark.ac("<KEY>:AC-n")`, which evidence reports as `ac:<KEY>:AC-n`; marker registered in `pyproject.toml`, `--strict-markers`; `idp spec-trace <KEY>` checks it; `p0`/`p1`/`critical`/`smoke`/`quarantine` markers), `## Fixture conventions` (`tmp_path`, `monkeypatch`, `conftest.py` at the narrowest scope, factories over shared mutable fixtures, independent data, `make test` writes JUnit + Cobertura to `$(REPORTS_DIR)`). (AC-6) |
 | packages/idp-gate/src/idp_gate/schemas/build-profile.v1.json | New JSON Schema (draft 2020-12), `$id` `https://github.com/suyashkunte/idp-platform/schemas/build-profile.v1.json`, fields per spec A1, `additionalProperties: false` at every object level. (AC-1) |
@@ -130,7 +140,7 @@ No protected paths change (root `Makefile`, root `pyproject.toml`, `.github/**`,
   description: ...
   setup:
   - name: Sync dependencies
-    run: uv sync --frozen
+    run: uv sync --locked
   defaultTargets:
   - sbom
   - sca
@@ -146,7 +156,7 @@ No protected paths change (root `Makefile`, root `pyproject.toml`, `.github/**`,
 - JSON output: the same object on one line, e.g. `{"name": "python-uv", ..., "dir": "/…/python-uv"}`.
 - Schema: new `build-profile.v1` (no change to `idp-service.v1`).
 - Make interface for tenants: `include $(IDP_PROFILE_DIR)/defaults.mk`; variables `IDP_SBOM_CMD`, `IDP_SCA_CMD`,
-  `IDP_EXPORT_CMD`, `IDP_REQUIREMENTS`, `IDP_CYCLONEDX_SPEC`, `IDP_PIP_AUDIT_SPEC`, `UV`, `REPORTS_DIR` (all `?=`);
+  `IDP_EXPORT_CMD`, `IDP_REQUIREMENTS`, `IDP_SBOM_EXPORT_CMD`, `IDP_SBOM_REQUIREMENTS`, `IDP_CYCLONEDX_SPEC`, `IDP_PIP_AUDIT_SPEC`, `UV`, `REPORTS_DIR` (all `?=`);
   reserved names `idp-default-*` and `_idp_*`.
 - Python API: `contract.load_schema(name=...)` (backward compatible); new module `profiles` (`profiles_root`,
   `available`, `validate_profile_document`, `load`, `resolve`, `ProfileError`, constants).

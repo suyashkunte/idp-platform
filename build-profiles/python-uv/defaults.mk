@@ -14,11 +14,15 @@ REPORTS_DIR ?= reports
 # the project's locked dependencies, exported with hashes from uv.lock using --locked: the export fails if uv.lock is
 # stale (out of date with pyproject.toml) and never writes uv.lock or the project environment. Network is needed only
 # when the recipes run (tool download, vulnerability database).
+# The SBOM describes what ships (runtime dependencies, --no-dev); SCA audits all groups, dev included, because dev
+# tools run in CI.
 IDP_CYCLONEDX_SPEC ?= cyclonedx-bom==7.5.0
 IDP_PIP_AUDIT_SPEC ?= pip-audit==2.10.1
 IDP_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.locked.txt
 IDP_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_REQUIREMENTS)
-IDP_SBOM_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_REQUIREMENTS)
+IDP_SBOM_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.sbom.txt
+IDP_SBOM_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-dev --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_SBOM_REQUIREMENTS)
+IDP_SBOM_CMD ?= $(IDP_SBOM_EXPORT_CMD) && $(UV) tool run --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_SBOM_REQUIREMENTS)
 IDP_SCA_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_PIP_AUDIT_SPEC) pip-audit --disable-pip --requirement $(IDP_REQUIREMENTS) --format json --output $(REPORTS_DIR)/sca.json
 
 .PHONY: idp-default-sbom idp-default-sca

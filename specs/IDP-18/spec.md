@@ -36,10 +36,13 @@ discovery mechanism that works from the installed package, and `idp profile show
     the profile's `defaults.mk`, checked with `contract.makefile_targets()` from IDP-17. ASSUMPTION A3.
 - **AC-2** Given a tenant Makefile that includes the profile's `defaults.mk` and does not define `sbom` or `sca`, when I run `make sbom` / `make sca`, then the profile defaults run.
   - Defaults run the commands in variables `IDP_SBOM_CMD` and `IDP_SCA_CMD` (assigned with `?=`, so a tenant or a test
-    can override them on the command line or in the Makefile). Default values (ASSUMPTION A4, Q4 resolved): both first
-    run `IDP_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_REQUIREMENTS)`
-    (`IDP_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.locked.txt`, hashed), then
-    `IDP_SBOM_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_REQUIREMENTS)`
+    can override them on the command line or in the Makefile). Default values (ASSUMPTION A4, Q4 resolved): the SBOM
+    exports runtime dependencies only with
+    `IDP_SBOM_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-dev --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_SBOM_REQUIREMENTS)`
+    (`IDP_SBOM_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.sbom.txt`); SCA exports all groups with
+    `IDP_EXPORT_CMD ?= $(UV) export --quiet --locked --all-packages --no-emit-project --no-emit-workspace --format requirements-txt --output-file $(IDP_REQUIREMENTS)`
+    (`IDP_REQUIREMENTS ?= $(REPORTS_DIR)/requirements.locked.txt`); both hashed. Then
+    `IDP_SBOM_CMD ?= $(IDP_SBOM_EXPORT_CMD) && $(UV) tool run --from $(IDP_CYCLONEDX_SPEC) cyclonedx-py requirements --output-format JSON --output-file $(REPORTS_DIR)/sbom.cdx.json $(IDP_SBOM_REQUIREMENTS)`
     and `IDP_SCA_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --from $(IDP_PIP_AUDIT_SPEC) pip-audit --disable-pip --requirement $(IDP_REQUIREMENTS) --format json --output $(REPORTS_DIR)/sca.json`,
     with pinned tools `IDP_CYCLONEDX_SPEC ?= cyclonedx-bom==7.5.0` and `IDP_PIP_AUDIT_SPEC ?= pip-audit==2.10.1`,
     `UV ?= uv` and `REPORTS_DIR ?= reports`. Both recipes run `mkdir -p $(REPORTS_DIR)` first, and fail with an error
@@ -105,9 +108,11 @@ discovery mechanism that works from the installed package, and `idp profile show
 - ASSUMPTION A3: `defaultTargets` ↔ `defaults.mk` consistency is a repo test, not a runtime check.
 - ASSUMPTION A4: default tool commands run exact-pinned tools via `uv tool run --from <spec>` (overridable `*_SPEC`
   variables), so tenants need not add the tools to their dev deps, against the project's locked dependencies exported
-  with `uv export --locked` (fails on a stale uv.lock; uv.lock and the project environment are not changed). Network
-  is only used when the recipe
-  runs. Flags confirmed by a real run against this repo (Q4, resolved).
+  with `uv export --locked` (fails on a stale uv.lock; uv.lock and the project environment are not changed). The SBOM
+  covers runtime dependencies only (`--no-dev`, what ships); SCA covers all groups, dev included, because dev tools
+  run in CI (reviewer decision). SCA audits the CI platform only (Linux/CPython); dependencies conditional on other
+  platforms are not audited. `make sca` fails on any finding until a gate engine decides instead. Network is only
+  used when the recipe runs. Flags confirmed by a real run against this repo (Q4, resolved).
 - ASSUMPTION A5: `defaults.mk` preserves the tenant's `.DEFAULT_GOAL`.
 - ASSUMPTION A6: resolved profile = document + `dir`; the printed object is therefore not itself schema-valid
   (`dir` is not a schema field).
@@ -147,24 +152,28 @@ discovery mechanism that works from the installed package, and `idp profile show
 ## Open questions
 - Q1: Meaning of "resolved profile" in AC-4. Proposed default: the validated document as loaded plus a `dir` key with
   the absolute profile directory (A6). Alternatives: the document only; or the document with schema defaults merged in
-  (the v1 schema has no defaults, so this equals the document).
+  (the v1 schema has no defaults, so this equals the document). DECIDED (reviewer): proposed default accepted.
 - Q2: How does a tenant Makefile locate `defaults.mk` in CI? Proposed default: tenants set `IDP_PROFILE_DIR` (in CI by
   the S5 setup action, locally by hand or from the `dir` printed by `idp profile show python-uv --json`) and use
   `include $(IDP_PROFILE_DIR)/defaults.mk`. Alternative: add `idp profile path <name>` now (small, but beyond the ACs).
+  DECIDED (reviewer): proposed default accepted; revisit with S5 setup action.
 - Q3: With `--json`, should exit-2 cases print a JSON error object (as `spec-trace --json` does for a missing spec)
-  instead of stderr only? Proposed default: stderr only, stdout empty, matching `idp validate` (A8).
+  instead of stderr only? Proposed default: stderr only, stdout empty, matching `idp validate` (A8). DECIDED
+  (reviewer): proposed default accepted.
 - Q4: Exact default commands and output files for `sbom`/`sca` (A4): `cyclonedx-py environment` vs `cyclonedx-py
   requirements` from `uv export`; `pip-audit` against the environment vs `uv export | pip-audit -r -`; output paths
   `reports/sbom.cdx.json` and `reports/sca.json`. RESOLVED (IDP-18 review round 1): `cyclonedx-py requirements` and
   `pip-audit --disable-pip --requirement` on a hashed `uv export --locked --all-packages` file (review round 2: `--locked` instead of `--frozen`) in `$(REPORTS_DIR)`,
   tools pinned to `cyclonedx-bom==7.5.0` / `pip-audit==2.10.1` and run with `uv tool run --from`; outputs
   `reports/sbom.cdx.json` and `reports/sca.json`. Verified by one real run against this repo (not in tests; tests stub
-  the commands and assert the full default lines with `make -n`).
+  the commands and assert the full default lines with `make -n`). Reviewer decision: the SBOM uses a separate
+  `--no-dev` export (`IDP_SBOM_EXPORT_CMD`, `requirements.sbom.txt`); SCA keeps all groups.
 - Q5: Should ADR-0012 move from "Proposed" to "Accepted" with this ticket? Proposed default: keep "Proposed" and add an
-  "Implementation notes (IDP-18)" section; acceptance is a human decision.
+  "Implementation notes (IDP-18)" section; acceptance is a human decision. DECIDED (reviewer): proposed default
+  accepted.
 - Q6: Is a test that builds the wheel with `uv build --wheel --offline` acceptable in `make verify` (a few seconds;
   relies on hatchling being in the uv cache, which `uv sync` guarantees)? Proposed default: yes, skipped if `uv` is not
-  on PATH.
+  on PATH. DECIDED (reviewer): proposed default accepted.
 
 ## Traceability
 | AC | Planned tests |

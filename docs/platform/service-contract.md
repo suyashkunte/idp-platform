@@ -129,16 +129,19 @@ Overridable variables (all `?=`; set them in the Makefile or on the command line
 
 | Variable | python-uv default |
 |---|---|
-| `IDP_SBOM_CMD` | export the locked dependencies, then `cyclonedx-py requirements` → `$(REPORTS_DIR)/sbom.cdx.json` |
-| `IDP_SCA_CMD` | export the locked dependencies, then `pip-audit --disable-pip --requirement` → `$(REPORTS_DIR)/sca.json` |
+| `IDP_SBOM_CMD` | export the locked runtime dependencies (`--no-dev`), then `cyclonedx-py requirements` → `$(REPORTS_DIR)/sbom.cdx.json` |
+| `IDP_SCA_CMD` | export all locked dependency groups (dev included), then `pip-audit --disable-pip --requirement` → `$(REPORTS_DIR)/sca.json` |
 | `IDP_CYCLONEDX_SPEC` | `cyclonedx-bom==7.5.0` (pinned; run with `uv tool run --from`) |
 | `IDP_PIP_AUDIT_SPEC` | `pip-audit==2.10.1` (pinned; run with `uv tool run --from`) |
 | `REPORTS_DIR` | `reports` |
 | `UV` | `uv` |
 
-- The export (`IDP_EXPORT_CMD`, into `IDP_REQUIREMENTS`, default `$(REPORTS_DIR)/requirements.locked.txt`) uses
-  `uv export --locked`: it fails if uv.lock is stale (run `uv lock`), and never changes uv.lock or the project
-  environment. Network is used only when the recipes
+- The exports use `uv export --locked`: they fail if uv.lock is stale (run `uv lock`), and never change uv.lock or
+  the project environment. SBOM = runtime dependencies (`IDP_SBOM_EXPORT_CMD`, `--no-dev`, into
+  `IDP_SBOM_REQUIREMENTS`, default `$(REPORTS_DIR)/requirements.sbom.txt`), so it describes what ships. SCA = all
+  groups, dev included, because dev tools run in CI (`IDP_EXPORT_CMD`, into `IDP_REQUIREMENTS`, default
+  `$(REPORTS_DIR)/requirements.locked.txt`). SCA covers the CI platform only (Linux/CPython, matching the deploy
+  target): dependencies conditional on other platforms are not audited. Network is used only when the recipes
   run (tool download, vulnerability database), never at parse time. Names `idp-default-*` and `_idp_*` are reserved.
 - `idp profile show <name> [--json]` prints the resolved profile (`profile.yaml` plus `dir`) as YAML, or as one JSON
   line with `--json`, and exits `0`. An invalid name, unknown or invalid profile, or missing profiles directory exits
@@ -155,7 +158,8 @@ Caveats:
 - An empty `IDP_SBOM_CMD`/`IDP_SCA_CMD` fails closed: make stops with an error naming the variable instead of exiting
   0 without evidence. A failing command fails the target.
 - `make sca` fails (non-zero exit) when pip-audit finds known vulnerabilities; read the findings in
-  `reports/sca.json`.
+  `reports/sca.json`. This is deliberate while no gate engine exists; once the policy/gate engine lands, `sca` becomes
+  report-only and the gate decides, with severity thresholds and expiring waivers.
 - Pipelines should check that `reports/sbom.cdx.json` and `reports/sca.json` exist (and are non-empty), not trust the
   exit code alone: a `.PHONY` listing or a tenant-defined target can exit 0 without writing evidence.
 

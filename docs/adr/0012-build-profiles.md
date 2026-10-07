@@ -63,3 +63,11 @@ Status stays Proposed; acceptance is a human decision (IDP-18 spec, Q5).
   changed.
 - Pins do not move by themselves: upgrading (for fixes or newer vulnerability matching) is a deliberate change in a
   ticket. Tenants can override the `*_SPEC` variables in the meantime.
+
+### SBOM and SCA scope (reviewer decisions)
+- SBOM = runtime dependencies: its export (`IDP_SBOM_EXPORT_CMD`) uses `--no-dev`, so the SBOM describes what ships.
+  SCA = all dependency groups, dev included (`IDP_EXPORT_CMD`), because dev tools run in CI.
+- `make sca` deliberately fails on any finding while no gate engine exists. When the policy/gate engine lands, `sca`
+  becomes report-only and the gate decides, with severity thresholds and expiring waivers.
+- SCA covers the CI platform only (Linux/CPython, matching the deploy target): dependencies that are conditional on
+  other platforms (environment markers such as `sys_platform == 'win32'`) are not audited.

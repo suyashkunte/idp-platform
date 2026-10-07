@@ -212,6 +212,8 @@ _MAKE_ENV_STRIPPED = frozenset(
         "IDP_PIP_AUDIT_SPEC",
         "IDP_REQUIREMENTS",
         "IDP_EXPORT_CMD",
+        "IDP_SBOM_REQUIREMENTS",
+        "IDP_SBOM_EXPORT_CMD",
     }
 )
 
@@ -298,12 +300,19 @@ def test_default_commands_use_profile_tools_in_dry_run(tmp_path: Path) -> None:
         f"{export} && /nonexistent/uv tool run --from pip-audit==2.10.1 pip-audit --disable-pip "
         "--requirement reports/requirements.locked.txt --format json --output reports/sca.json"
     ) in sca.stdout.splitlines()
+    sbom_export = (
+        "/nonexistent/uv export --quiet --locked --all-packages --no-dev --no-emit-project --no-emit-workspace "
+        "--format requirements-txt --output-file reports/requirements.sbom.txt"
+    )
     sbom = _make(tmp_path, "-n", "sbom", "UV=/nonexistent/uv", stub=False)
     assert (sbom.returncode, sbom.stderr) == (0, "")
     assert (
-        f"{export} && /nonexistent/uv tool run --from cyclonedx-bom==7.5.0 cyclonedx-py requirements "
-        "--output-format JSON --output-file reports/sbom.cdx.json reports/requirements.locked.txt"
+        f"{sbom_export} && /nonexistent/uv tool run --from cyclonedx-bom==7.5.0 cyclonedx-py requirements "
+        "--output-format JSON --output-file reports/sbom.cdx.json reports/requirements.sbom.txt"
     ) in sbom.stdout.splitlines()
+    # The SBOM describes what ships (runtime deps only); SCA audits every group, dev tools included.
+    assert " --no-dev " in sbom.stdout
+    assert "--no-dev" not in sca.stdout
     assert not (tmp_path / "reports").exists()  # dry run executes nothing
 
 
