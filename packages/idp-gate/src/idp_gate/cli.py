@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
 
-from idp_gate import __version__, approve_spec, contract, profiles, spec_trace, test_quality
+from idp_gate import __version__, approve_spec, conformance, contract, profiles, spec_trace, test_quality
 
 
 def _cmd_spec_trace(args: argparse.Namespace) -> int:
@@ -73,6 +74,28 @@ def _cmd_profile_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_conformance(args: argparse.Namespace) -> int:
+    root = Path(args.dir)
+    if not root.is_dir():
+        print(f"conformance: {args.dir!r} is not a directory", file=sys.stderr)
+        return 2
+    make = shutil.which("make")
+    if make is None:
+        print("conformance: make not found on PATH", file=sys.stderr)
+        return 2
+    examples = conformance.find_examples(root)
+    if not examples:
+        print(f"conformance: no examples with idp.yaml in {args.dir!r}", file=sys.stderr)
+        return 2
+    failed = 0
+    for example in examples:
+        result = conformance.check_example(example, make)
+        failed += not result.ok
+        print("\n".join(result.lines()), flush=True)
+    print(f"conformance: {len(examples) - failed} passed, {failed} failed")
+    return 1 if failed else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="idp", description="Intelligent Delivery Pipeline CLI")
     parser.add_argument("--version", action="version", version=f"idp {__version__}")
@@ -104,6 +127,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name")
     p.add_argument("--json", action="store_true", help="print a JSON object instead of YAML")
     p.set_defaults(func=_cmd_profile_show)
+
+    p = sub.add_parser("conformance", help="run idp validate and make verify for every example (IDP-19)")
+    p.add_argument("dir", nargs="?", default="examples")
+    p.set_defaults(func=_cmd_conformance)
     return parser
 
 

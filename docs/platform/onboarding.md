@@ -19,6 +19,17 @@ Then push `my-app`; its first PR runs the full pipeline, with gates in **shadow 
 4. Add `.github/workflows/idp.yml` (10 lines), `.claude/settings.json` (enable the plugin) and `CLAUDE.md`.
 5. `idp onboard` → catalog PR → shadow mode → review hold rates for 2 weeks → set `gates.mode: enforced` in the catalog (§7.1 rollout rule).
 
+## Reference example
+[`examples/minimal-service/`](../../examples/minimal-service/README.md) is the smallest service that passes
+`idp validate` and `make verify` with the `python-uv` profile defaults: stdlib health endpoints
+(`/healthz/{live,ready,startup}`), an `idp.yaml` and a Makefile that includes `$(IDP_PROFILE_DIR)/defaults.mk`. It is a
+conformance fixture, not a template: start new applications from the templates above.
+
+`make conformance` at the platform root runs `idp conformance examples`: for every `examples/*/` with an `idp.yaml` it
+runs `idp validate`, resolves the build profile and runs `make verify` (with `IDP_PROFILE_DIR` set to the resolved
+profile directory), printing one `PASS`/`FAIL` line per example and a summary; it exits non-zero if any example fails.
+`make verify` includes `make conformance`, so platform CI catches platform changes that would break tenants.
+
 ## Readiness checklist (design doc Appendix B.3, adapted)
 - [ ] `idp validate` passes; catalog entry merged
 - [ ] Make contract targets present; `make verify` green locally

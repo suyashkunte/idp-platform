@@ -5,7 +5,7 @@ UV ?= uv
 REPORTS_DIR ?= reports
 COV_MIN ?= 85
 
-.PHONY: help setup lint fmt format test verify verify-fast spec-trace approve-spec validate-plugin clean
+.PHONY: help setup lint fmt format test verify verify-fast spec-trace approve-spec validate-plugin clean conformance
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
@@ -34,7 +34,7 @@ test: ## Unit tests with coverage; JUnit + Cobertura into $(REPORTS_DIR)/
 
 verify-fast: lint test ## Quick local gate (agent Stop hook)
 
-verify: verify-fast validate-plugin ## Everything a PR must pass locally
+verify: verify-fast validate-plugin conformance ## Everything a PR must pass locally
 	$(UV) run bandit -q -c pyproject.toml -r packages
 	@if git rev-parse --verify -q origin/main >/dev/null; then \
 	  $(UV) run diff-cover $(REPORTS_DIR)/coverage.xml --compare-branch=origin/main --fail-under=80; fi
@@ -45,6 +45,9 @@ verify: verify-fast validate-plugin ## Everything a PR must pass locally
 
 validate-plugin: ## Structural checks for the idp-agentic plugin and marketplace
 	$(UV) run pytest -q tests/plugin --no-cov -p no:cacheprovider
+
+conformance: ## idp validate + make verify for every examples/*/ with an idp.yaml (IDP-19)
+	$(UV) run idp conformance examples
 
 spec-trace: ## make spec-trace KEY=IDP-12
 	$(UV) run idp spec-trace $(KEY)
