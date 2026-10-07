@@ -321,6 +321,17 @@ def test_defaults_mk_needs_no_commands_at_parse_time(tmp_path: Path) -> None:
 
 
 @pytest.mark.ac("IDP-18:AC-3")
+def test_including_defaults_twice_gives_no_warnings(tmp_path: Path) -> None:
+    include = "include $(IDP_PROFILE_DIR)/defaults.mk\n"
+    (tmp_path / "Makefile").write_text(include + "build:\n\t@echo tenant-build\n" + include)
+    sca = _make(tmp_path, "sca")
+    assert (sca.returncode, sca.stderr) == (0, "")
+    assert sca.stdout.splitlines() == ["echo default-sca", "default-sca"]  # the default recipe runs once
+    default = _make(tmp_path)
+    assert (default.returncode, default.stdout, default.stderr) == (0, "tenant-build\n", "")
+
+
+@pytest.mark.ac("IDP-18:AC-3")
 @pytest.mark.parametrize("include_first", [True, False], ids=["include-first", "include-last"])
 def test_tenant_target_overrides_default_without_warnings(tmp_path: Path, include_first: bool) -> None:
     _tenant(tmp_path, "build:\n\t@echo tenant-build\nsca:\n\t@echo tenant-sca\n", include_first)

@@ -2,6 +2,9 @@
 # A target the tenant does not define (sbom, sca) runs idp-default-<target>; defining it yourself overrides the
 # default without warnings. Caveats: listing sbom/sca in .PHONY without a recipe, or your own `%:` rule, bypasses the
 # fallback. Reserved names: idp-default-*, _idp_*. No commands run at parse time.
+# Include guard: a second include is a no-op (no duplicate rules, no override warnings).
+ifndef _idp_python_uv_defaults
+_idp_python_uv_defaults := 1
 _idp_saved_goal := $(.DEFAULT_GOAL)
 UV ?= uv
 REPORTS_DIR ?= reports
@@ -31,3 +34,4 @@ idp-default-sca:
 	@:
 
 .DEFAULT_GOAL := $(_idp_saved_goal)
+endif
