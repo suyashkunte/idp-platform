@@ -79,12 +79,20 @@ spec:
   target is reported, not only the first. A missing Makefile is reported as a single `Makefile not found` violation.
   Make checks also run when the schema check fails, but are skipped if the YAML cannot be parsed into a mapping.
 - Targets are found by **static parsing**; `make` is never executed. A target counts when a line at column 0 names it
-  before `:` or `::` (not `:=`, `::=`, `:::=`); comments after `#` are ignored. Not counted: names listed only in
-  `.PHONY:` or other special targets starting with `.`, pattern rules (`%`), names containing `$(...)`, variable
-  assignments, recipe (tab-indented) and indented lines. `include`, `-include` and `sinclude` are followed recursively for
-  literal paths relative to the Makefile's directory; words with `$` or glob characters and files not on disk are
-  skipped. Limitations: `define`/`endef` bodies, conditionals (targets in either branch count), line continuations in
-  rule lines and variable expansion are not interpreted, so define required targets as plain rules.
+  before `:` or `::` (not `:=`, `::=`, `:::=`); comments after an unescaped `#` are ignored (`\#` is a literal hash).
+  Not counted: names listed only in `.PHONY:` or other special targets starting with `.`, pattern rules (`%`), names
+  containing `$(...)`, variable assignments, target-specific variable lines (`name: VAR = x`, also with `:=`, `?=`,
+  `+=`, `!=`, `export`/`override`), lines inside `define ... endef` (skipped, nesting supported), recipe (tab-indented)
+  and indented lines. `include`, `-include` and `sinclude` are followed recursively for literal paths relative to the
+  Makefile's directory; words with `$` or glob characters and files not on disk are skipped. Limitations: conditionals
+  (`ifeq`/`ifdef`/...) are not evaluated (targets in either branch count); line continuations in rule lines and
+  variable expansion are not interpreted, so define required targets as plain rules.
+- Reads are **confined to the service directory** (the directory of the validated `idp.yaml`): absolute include paths,
+  includes escaping it via `..`, and files whose real path (after symlinks) is outside it are not read and are reported,
+  e.g. `include '../shared.mk' is outside the service directory` or `Makefile resolves outside the service directory`.
+  Each file is read up to 1 MiB (`'<name>' exceeds 1 MiB`) and at most 64 files are read
+  (`too many included files (limit 64)`). Unreadable, non-UTF-8 or symlink-loop files give `cannot read '<name>'`.
+  When any of these occur, only these problems are reported (the target list would be incomplete).
 - Text output: `<file>: valid (idp-service.v1.json)`, or one line per violation, e.g.
   `idp.yaml: Makefile: missing required target 'lint'`.
 - `--json` prints exactly one JSON line with keys `file`, `valid`, `schema`, `violations` (each `{path, message}`;

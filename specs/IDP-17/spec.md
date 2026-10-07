@@ -57,18 +57,37 @@ check and an opt-in `--json` flag. Catalog consistency and tighten-only override
   YAML/schema violation(s) are reported. ASSUMPTION A9.
 - Target detection (NFR) - a line defines targets when it matches, at column 0, one or more whitespace-separated names
   followed by `:` or `::` (double-colon rules count) and the colon is not part of `:=`, `::=` or `:::=`. Comments after
-  `#` are ignored, so `spec-trace: ## help text` defines `spec-trace`. ASSUMPTION A10.
+  an unescaped `#` are ignored, so `spec-trace: ## help text` defines `spec-trace`; `\#` is a literal hash (not a
+  comment) and is unescaped in target names. ASSUMPTION A10.
   - Recipe lines (leading tab) and indented lines are never rule lines.
   - Names containing `%` (pattern rules) and special targets starting with `.` (`.PHONY`, `.DEFAULT`, ...) are ignored.
     A target named only in `.PHONY:` is NOT defined.
   - Variable assignments (`X = y`, `X := y`, `X ?= y`, `X += y`) are not rules.
-  - Not handled (documented limitation): `define`/`endef` bodies, `$(...)` in target names (skipped), conditionals
-    (`ifeq`/`ifdef` - targets in either branch count), line continuations in rule lines, target-specific variable
-    lines (`name: VAR = x` counts as defining `name`). ASSUMPTION A10.
+  - Target-specific variable lines do NOT define targets: `name: VAR = x`, and the same with `:=`, `::=`, `:::=`, `?=`,
+    `+=`, `!=`, optionally preceded after the colon by `export`/`override`/`private` (e.g.
+    `name: export VAR = x`).
+  - `define ... endef` bodies are skipped (nesting counted; `define` may be preceded by `override`/`export`/`private`;
+    a tab-indented `define` outside a body is a recipe line, not a directive).
+  - Not handled (documented limitation): `$(...)` in target names (skipped), conditionals (`ifeq`/`ifdef`/`ifndef`/
+    `ifneq` are not evaluated - targets in either branch count), line continuations in rule lines, variable expansion.
+    ASSUMPTION A10.
 - `include` handling (NFR) - `include`, `-include` and `sinclude` lines are followed, treated identically: each
   whitespace-separated word is a literal path resolved relative to the Makefile's directory; words containing `$` or
   glob characters (`*?[`) are skipped; files not present on disk are skipped silently; includes are followed
-  recursively with a visited-set guard against cycles. ASSUMPTION A11, see Q1.
+  recursively with a visited-set guard (on real paths) against cycles. ASSUMPTION A11, see Q1.
+  - Confinement (security: CI runs this on untrusted tenant PRs). The service root is the resolved directory of the
+    validated `idp.yaml`. Absolute include words, words that escape the root lexically (`../x.mk`) and words whose real
+    path (symlinks followed) is outside the root are not read; each is a Make violation
+    `include '<word>' is outside the service directory` (word shown with `repr`). A Makefile whose real path is outside
+    the root gives `Makefile resolves outside the service directory`. File contents are never echoed.
+  - Limits: each file is read up to 1 MiB (`MAX_MAKEFILE_BYTES`; at most cap+1 bytes are read) - over the cap gives
+    `'<name>' exceeds 1 MiB`; at most 64 files (`MAX_MAKEFILES`, Makefile included) are read - more gives
+    `too many included files (limit 64)` and scanning stops.
+  - Unreadable files (permission error, not a regular file, non-UTF-8, symlink loop) give `cannot read '<name>'`
+    instead of a traceback; `--json` still prints one JSON object and exits 1. `<name>` is the include word as written,
+    or `Makefile`.
+  - When any of these read problems occur, only the read-problem violations are reported (no per-target violations,
+    since the target list would be incomplete), like `Makefile not found` in AC-6. Order: scan order (deterministic).
 - The validated file has a different name (e.g. `idp validate path/good.yaml`): the Makefile looked for is
   `path/Makefile` (A1).
 - Text output format is unchanged: one line per violation `<file>: <path>: <message>`, e.g.
@@ -88,8 +107,10 @@ check and an opt-in `--json` flag. Catalog consistency and tighten-only override
 - ASSUMPTION A7: Make checks run even when schema validation failed; "single violation" in AC-6 counts Make violations.
 - ASSUMPTION A8: only `Makefile` is recognised.
 - ASSUMPTION A9: unparseable YAML or a non-mapping document skips Make checks.
-- ASSUMPTION A10: line-based rule parsing with the limitations listed.
-- ASSUMPTION A11: literal include paths relative to the Makefile directory; `$`/glob words and missing files skipped.
+- ASSUMPTION A10: line-based rule parsing with the limitations listed (target-specific variable lines and `define`
+  bodies are not rules; `\#` is not a comment; conditionals are not evaluated).
+- ASSUMPTION A11: literal include paths relative to the Makefile directory; `$`/glob words and missing files skipped;
+  reads confined to the service root, capped at 1 MiB per file and 64 files; read problems are violations.
 - ASSUMPTION A12: human-readable output format unchanged (prefix `<file>: ` on every violation line).
 - ASSUMPTION A13: the IDP-8 CLI test gets a Makefile fixture; no other existing test changes.
 
@@ -97,7 +118,8 @@ check and an opt-in `--json` flag. Catalog consistency and tighten-only override
 - Target detection parses Makefile rule lines only; `make` (or any subprocess) is never executed. Verified by a test that
   monkeypatches `subprocess.run`/`subprocess.Popen` to raise and still gets correct results, and by code review (no
   `subprocess` import in `contract.py`).
-- Included files are read only if present on disk; a missing include never raises.
+- Included files are read only if present on disk; a missing include never raises. No file outside the service root is
+  read; per-file (1 MiB) and file-count (64) caps bound the work on untrusted input; unreadable files never raise.
 - No new runtime dependencies: only the standard library (`re`, `json`, `pathlib`) plus the existing `yaml` and
   `jsonschema`; `pyproject.toml` and `uv.lock` unchanged.
 - Deterministic output: violation order is fixed (schema violations as today, then Make violations in the order defined
@@ -106,7 +128,7 @@ check and an opt-in `--json` flag. Catalog consistency and tighten-only override
 ## Out of scope
 - Catalog consistency and tighten-only override checks (iteration 3).
 - `--fix`.
-- Executing `make` (e.g. `make -n`/`make -p`) or full GNU make semantics (variable expansion, conditionals, `define`).
+- Executing `make` (e.g. `make -n`/`make -p`) or full GNU make semantics (variable expansion, conditionals; `define` bodies are only skipped).
 - Checking recommended targets (`verify-fast`, `format`) or optional ones (`sbom`, `sca`), or what targets do.
 - Directory arguments (`idp validate some/dir`) and discovery in parent directories.
 - Changing the platform repo's own Makefile (protected path; not needed).
@@ -126,12 +148,25 @@ check and an opt-in `--json` flag. Catalog consistency and tighten-only override
 - Q6: Should the violation `path` for Make violations be `"Makefile"` or the actual path (e.g. `path/to/Makefile`)?
   Proposed default: `"Makefile"` (A2).
 
+## Review changes
+Changes after code review (spec still DRAFT, auto mode), all recorded in A10/A11 above:
+- A10: target-specific variable lines (`name: VAR = x` and `:=`/`::=`/`:::=`/`?=`/`+=`/`!=`, with
+  `export`/`override`) no longer count as defining `name` (previously a documented limitation; the existing parser test
+  was flipped accordingly).
+- A10: `define ... endef` bodies (nested, with `override`/`export`) are skipped instead of parsed; conditionals remain a
+  documented limitation.
+- A10: `\#` no longer starts a comment.
+- A11: reads confined to the service root (absolute / escaping / symlinked-outside includes and an outside Makefile are
+  violations), 1 MiB per-file and 64-file caps, unreadable / non-UTF-8 / symlink-loop files reported as
+  `cannot read '<name>'` instead of a traceback; on any such problem only those violations are reported.
+- Python API: `makefile_targets()` now returns `MakefileScan(targets, violations)` instead of `set[str]`.
+
 ## Traceability
 | AC | Planned tests |
 |----|---------------|
 | AC-1 | packages/idp-gate/tests/test_contract.py::test_validate_without_argument_uses_cwd_idp_yaml_and_exits_0, packages/idp-gate/tests/test_contract.py::test_makefile_targets_parses_rules_includes_and_ignores_non_rules |
-| AC-2 | packages/idp-gate/tests/test_contract.py::test_enabled_test_kind_without_target_is_reported, packages/idp-gate/tests/test_contract.py::test_disabled_test_kind_does_not_require_target |
-| AC-3 | packages/idp-gate/tests/test_contract.py::test_every_missing_required_target_is_listed, packages/idp-gate/tests/test_contract.py::test_phony_only_and_pattern_rules_do_not_define_targets, packages/idp-gate/tests/test_contract.py::test_make_checks_run_with_schema_violations, packages/idp-gate/tests/test_contract.py::test_target_detection_never_runs_make |
+| AC-2 | packages/idp-gate/tests/test_contract.py::test_enabled_test_kind_without_target_is_reported, packages/idp-gate/tests/test_contract.py::test_disabled_test_kind_does_not_require_target, packages/idp-gate/tests/test_contract.py::test_non_boolean_or_non_mapping_tests_only_give_schema_violations |
+| AC-3 | packages/idp-gate/tests/test_contract.py::test_every_missing_required_target_is_listed, packages/idp-gate/tests/test_contract.py::test_phony_only_and_pattern_rules_do_not_define_targets, packages/idp-gate/tests/test_contract.py::test_make_checks_run_with_schema_violations, packages/idp-gate/tests/test_contract.py::test_target_detection_never_runs_make, packages/idp-gate/tests/test_contract.py::test_target_specific_variable_lines_do_not_define_targets, packages/idp-gate/tests/test_contract.py::test_define_bodies_are_skipped_including_nested_ones, packages/idp-gate/tests/test_contract.py::test_escaped_hash_does_not_start_a_comment |
 | AC-4 | packages/idp-gate/tests/test_contract.py::test_json_valid_output_and_exit_0, packages/idp-gate/tests/test_contract.py::test_json_invalid_output_lists_violations_and_exits_1, packages/idp-gate/tests/test_contract.py::test_json_missing_file_exits_2_with_empty_stdout |
 | AC-5 | packages/idp-gate/tests/test_contract.py::test_no_idp_yaml_in_cwd_exits_2_with_not_found_message |
-| AC-6 | packages/idp-gate/tests/test_contract.py::test_missing_makefile_is_single_violation |
+| AC-6 | packages/idp-gate/tests/test_contract.py::test_missing_makefile_is_single_violation, packages/idp-gate/tests/test_contract.py::test_include_outside_service_directory_is_a_violation, packages/idp-gate/tests/test_contract.py::test_symlinked_include_outside_service_directory_is_a_violation, packages/idp-gate/tests/test_contract.py::test_makefile_symlinked_outside_service_directory_is_a_violation, packages/idp-gate/tests/test_contract.py::test_oversized_makefile_or_include_is_a_violation, packages/idp-gate/tests/test_contract.py::test_too_many_included_files_is_a_violation, packages/idp-gate/tests/test_contract.py::test_unreadable_files_are_violations_not_tracebacks |
