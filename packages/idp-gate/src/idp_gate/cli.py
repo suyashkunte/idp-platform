@@ -47,6 +47,9 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         print(f"validate: {path} not found", file=sys.stderr)
         return 2
     violations = contract.validate_service(path)
+    if args.json:
+        print(json.dumps(contract.to_dict(args.file, violations)))
+        return 1 if violations else 0
     for v in violations:
         print(f"{path}: {v}")
     if not violations:
@@ -74,8 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--root", default=".")
     p.set_defaults(func=_cmd_approve_spec)
 
-    p = sub.add_parser("validate", help="validate idp.yaml against the service contract schema")
+    p = sub.add_parser("validate", help="validate idp.yaml against the service contract schema and the Make contract")
     p.add_argument("file", nargs="?", default="idp.yaml")
+    p.add_argument("--json", action="store_true", help="print a JSON object instead of text")
     p.set_defaults(func=_cmd_validate)
     return parser
 

@@ -12,7 +12,8 @@ from typing import Any
 import yaml
 from jsonschema import Draft202012Validator
 
-SCHEMA_NAME = "idp-service.v1.json"
+SCHEMA_ID = "idp-service.v1"
+SCHEMA_NAME = f"{SCHEMA_ID}.json"
 MAKE_PATH = "Makefile"
 REQUIRED_TARGETS = ("lint", "test", "test-component", "verify", "spec-trace")
 TEST_KINDS = ("smoke", "api", "e2e", "perf")
@@ -119,3 +120,13 @@ def validate_service(path: Path) -> list[Violation]:
     if isinstance(doc, dict):
         violations += check_make_contract(doc, path.parent / MAKE_PATH)
     return violations
+
+
+def to_dict(file: str, violations: list[Violation]) -> dict[str, object]:
+    """Machine-readable result for `idp validate --json` (key order is part of the interface)."""
+    return {
+        "file": file,
+        "valid": not violations,
+        "schema": SCHEMA_ID,
+        "violations": [{"path": v.path, "message": v.message} for v in violations],
+    }
