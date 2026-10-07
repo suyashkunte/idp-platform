@@ -141,24 +141,32 @@ runs `idp validate` and `make verify` for every example; the root `Makefile` (a 
 ## Open questions
 - Q1: "Every directory under `examples/`": immediate subdirectories only, or any depth? Proposed default: immediate
   subdirectories, sorted, dot-directories skipped (A5).
+  DECIDED (reviewer, PR #7): proposed default accepted.
 - Q2: Missing `examples/` or no example with `idp.yaml`: exit `2` (refuse) or exit `0` with `conformance: 0 passed,
   0 failed`? Proposed default: exit `2`, so a misconfigured run cannot look green (A8).
+  DECIDED (reviewer, PR #7): proposed default accepted.
 - Q3: Should the runner pass `IDP_PROFILE_DIR` resolved from `spec.build.profile` (proposed; exercises profile
   discovery and lets examples be copied anywhere, e.g. into `tmp_path`), or run plain `make verify` and rely on the
   Makefile's relative default? Consequence of the proposal: an example whose profile has no directory (today
   `dockerfile`) fails conformance (A6).
+  DECIDED (reviewer, PR #7): proposed default accepted.
 - Q4: The Make contract says `make test` writes `junit-unit.xml` and `coverage.xml`. Is a stdlib-only fixture whose
   `test` writes neither acceptable (proposed, A3), or should it write a minimal JUnit file via a small custom unittest
   runner?
+  DECIDED (reviewer, PR #7): proposed default accepted.
 - Q5: Is a no-op `test-component` acceptable for a dependency-free fixture (proposed), or should it start the server
   as a subprocess and probe the health endpoints?
+  DECIDED (reviewer, PR #7): proposed default accepted.
 - Q6: When `idp validate` fails, skip `make verify` (proposed) or run it anyway and report both?
+  DECIDED (reviewer, PR #7): proposed default accepted.
 - Q7: uv behaviour for a `pyproject.toml` nested under the workspace root but not listed in `members` was not verified
   here (no shell access in the spec session). The design avoids the question by giving the example no
   `pyproject.toml` and not invoking uv in its `verify`. Is a pyproject-less example acceptable for a "python-uv"
   fixture, given that `make sbom`/`make sca` in it would describe the platform workspace (not run by conformance)?
+  DECIDED (reviewer, PR #7): proposed default accepted.
 - Q8: Output format: one result line per example plus indented details and a summary line (proposed, A7). Should
   details go to stderr instead of stdout?
+  DECIDED (reviewer, PR #7): proposed default accepted.
 
 ## Traceability
 | AC | Planned tests |
