@@ -96,7 +96,7 @@ def test_minimal_service_passes_idp_validate_and_make_verify(
 
     code = _run(["validate"])
 
-    assert capsys.readouterr().out == "idp.yaml: valid (idp-service.v1)\n"
+    assert capsys.readouterr().out == "idp.yaml: valid (idp-service.v1.json)\n"
     assert code == 0
     result = _make("verify")  # by hand: relies on the Makefile's relative IDP_PROFILE_DIR default
     assert result.returncode == 0, result.stdout + result.stderr
