@@ -42,18 +42,23 @@ def runner_violations(root: Path) -> list[str]:
     """Every violating job across all workflow files, as ``<rel path>: job '<id>': <problem>``, sorted."""
     out: list[str] = []
     for path in workflow_files(root):
+        rel = path.relative_to(root).as_posix()
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        for job_id, job in (data.get("jobs") or {}).items():
+        jobs = data.get("jobs") if isinstance(data, dict) else None
+        if not isinstance(jobs, dict):
+            out.append(f"{rel}: jobs is missing or not a mapping")
+            continue
+        for job_id, job in jobs.items():
             problem = runs_on_problem(job if isinstance(job, dict) else {})
             if problem:
-                out.append(f"{path.relative_to(root).as_posix()}: job '{job_id}': {problem}")
+                out.append(f"{rel}: job '{job_id}': {problem}")
     return sorted(out)
 
 
 def _write_workflow(root: Path, name: str, jobs: str) -> None:
     wf = root / ".github" / "workflows"
     wf.mkdir(parents=True, exist_ok=True)
-    (wf / name).write_text(f"name: t\non: push\njobs:\n{jobs}")
+    (wf / name).write_text(f"name: t\non: push\njobs:\n{jobs}", encoding="utf-8")
 
 
 # --- synthetic inputs (T1) -------------------------------------------------------------------------------------------
@@ -108,10 +113,22 @@ def test_all_violations_reported_in_one_run(tmp_path: Path) -> None:
     _write_workflow(tmp_path, "b.yaml", "  test:\n    runs-on: [macos-latest]\n")
     nested = tmp_path / ".github" / "workflows" / "sub"
     nested.mkdir()
-    (nested / "ignored.yml").write_text("jobs:\n  x:\n    runs-on: ubuntu-latest\n")
+    (nested / "ignored.yml").write_text("jobs:\n  x:\n    runs-on: ubuntu-latest\n", encoding="utf-8")
     assert runner_violations(tmp_path) == [
         ".github/workflows/a.yml: job 'lint': runs-on 'ubuntu-latest' is not allowed; use 'ubuntu-24.04'",
         ".github/workflows/b.yaml: job 'test': runs-on ['macos-latest'] is not allowed; use 'ubuntu-24.04'",
+    ]
+
+
+@pytest.mark.ac("IDP-12:AC-2")
+def test_workflow_without_jobs_mapping_is_reported_by_file(tmp_path: Path) -> None:
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "list.yml").write_text("- not\n- a mapping\n", encoding="utf-8")
+    (wf / "nojobs.yml").write_text("name: t\njobs: [build]\n", encoding="utf-8")
+    assert runner_violations(tmp_path) == [
+        ".github/workflows/list.yml: jobs is missing or not a mapping",
+        ".github/workflows/nojobs.yml: jobs is missing or not a mapping",
     ]
 
 
