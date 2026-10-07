@@ -33,10 +33,12 @@ IDP_SCA_CMD ?= $(IDP_EXPORT_CMD) && $(UV) tool run --exclude-newer $(IDP_TOOLS_E
 # An empty command fails (fail closed) instead of silently producing no evidence.
 idp-default-sbom:
 	$(if $(strip $(IDP_SBOM_CMD)),,$(error IDP_SBOM_CMD is empty: set it or define your own sbom target))
+	$(if $(strip $(IDP_TOOLS_EXCLUDE_NEWER)),,$(error IDP_TOOLS_EXCLUDE_NEWER is empty: set it to a fixed date (RFC 3339, e.g. 2026-10-06T00:00:00Z) so tool dependencies resolve reproducibly))
 	@mkdir -p $(REPORTS_DIR)
 	$(IDP_SBOM_CMD)
 idp-default-sca:
 	$(if $(strip $(IDP_SCA_CMD)),,$(error IDP_SCA_CMD is empty: set it or define your own sca target))
+	$(if $(strip $(IDP_TOOLS_EXCLUDE_NEWER)),,$(error IDP_TOOLS_EXCLUDE_NEWER is empty: set it to a fixed date (RFC 3339, e.g. 2026-10-06T00:00:00Z) so tool dependencies resolve reproducibly))
 	@mkdir -p $(REPORTS_DIR)
 	$(IDP_SCA_CMD)
 
