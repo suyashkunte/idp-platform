@@ -18,6 +18,12 @@ versions follow [Semantic Versioning](https://semver.org/).
   `--json` (still defaults to `./idp.yaml`). Makefile reads are confined to the service directory and capped
   (1 MiB per file, 64 files, 1024 include words, 20 include problems). Includes outside the service directory
   (e.g. a shared `../common.mk`) are rejected, even with `-include`.
+- IDP-18: build profile `python-uv` (`build-profiles/python-uv/`: `profile.yaml`; `defaults.mk` with overridable
+  `sbom`/`sca` default targets that run pinned `cyclonedx-bom==7.5.0` / `pip-audit==2.10.1` via `uv tool run` against
+  the locked dependencies, fail closed on an empty command and are included as `include $(IDP_PROFILE_DIR)/defaults.mk`;
+  `agent-notes.md` with pytest idioms, AC tagging and fixture conventions, referenced by the unit-test-generator agent).
+  Schema `build-profile.v1` shipped in `idp-gate` (profiles included in the wheel) and `idp profile show <name> [--json]`
+  (resolved profile plus `dir`; exit 2 with the profile name and reason on stderr).
 
 ### Changed
 - IDP-12: pin GitHub Actions runners to `ubuntu-24.04`; a test fails on any other `runs-on`.
