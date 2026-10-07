@@ -929,17 +929,29 @@ class _Build:
 
 
 def _uv_build_env(base: dict[str, str]) -> dict[str, str]:
-    """The environment passed to `uv build`, derived from `base`."""
-    return dict(base)
+    """The environment passed to `uv build`: `base` without UV_*/PIP_* variables, except the `_UV_ENV_KEEP` names."""
+    return {k: v for k, v in base.items() if k in _UV_ENV_KEEP or not k.startswith(("UV_", "PIP_"))}
 
 
 def _uv_build_argv(tree: Path, out_dir: Path, *flags: str) -> list[str]:
     """The `uv build` command line used by both session builds."""
-    return ["uv", "build", *flags, "--offline", "--out-dir", str(out_dir), str(tree / "packages" / "idp-gate")]
+    return [
+        "uv",
+        "build",
+        *flags,
+        "--offline",
+        "--no-config",
+        "--build-constraint",
+        str(BUILD_CONSTRAINTS),
+        "--require-hashes",
+        "--out-dir",
+        str(out_dir),
+        str(tree / "packages" / "idp-gate"),
+    ]
 
 
 def _uv_build(tree: Path, out_dir: Path, *flags: str) -> _Build:
-    base = dict(os.environ)
+    base = dict(os.environ) | _POLLUTED_ENV  # IDP-24 spec A5: polluted on purpose, stripped by _uv_build_env
     env = _uv_build_env(base)
     argv = _uv_build_argv(tree, out_dir, *flags)
     result = subprocess.run(
