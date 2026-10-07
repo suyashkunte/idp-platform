@@ -14,3 +14,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/idp_gate"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"../../build-profiles" = "idp_gate/build_profiles"
