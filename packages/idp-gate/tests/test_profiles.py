@@ -196,12 +196,30 @@ def test_default_targets_have_recipes_in_defaults_mk() -> None:
 # --- AC-2 / AC-3: make-level behaviour of defaults.mk ------------------------------------------------------------
 
 
+# Inherited make state and profile variables (`?=` reads the environment) must not leak into make-level tests.
+_MAKE_ENV_STRIPPED = frozenset(
+    {
+        "MAKEFLAGS",
+        "MAKELEVEL",
+        "MFLAGS",
+        "REPORTS_DIR",
+        "UV",
+        "IDP_SBOM_CMD",
+        "IDP_SCA_CMD",
+        "IDP_CYCLONEDX_SPEC",
+        "IDP_PIP_AUDIT_SPEC",
+        "IDP_REQUIREMENTS",
+        "IDP_EXPORT_CMD",
+    }
+)
+
+
 def _make(directory: Path, *args: str, stub: bool = True) -> subprocess.CompletedProcess[str]:
     """Run make in `directory` with the python-uv profile; tool commands are stubbed unless `stub` is False."""
     if shutil.which("make") is None:
         pytest.skip("make is not installed")
     _require(DEFAULTS_MK)
-    env = {k: v for k, v in os.environ.items() if k not in {"MAKEFLAGS", "MAKELEVEL", "MFLAGS"}}
+    env = {k: v for k, v in os.environ.items() if k not in _MAKE_ENV_STRIPPED}
     argv = ["make", "--no-print-directory", "-C", str(directory), *args, f"IDP_PROFILE_DIR={PROFILE_DIR}"]
     if stub:
         argv += ["IDP_SBOM_CMD=echo default-sbom", "IDP_SCA_CMD=echo default-sca"]
