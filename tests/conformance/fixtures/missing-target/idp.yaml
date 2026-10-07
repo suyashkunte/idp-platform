@@ -1,0 +1,17 @@
+# IDP-19 negative conformance fixture: a valid minimal-service contract. The ONE defect is in the Makefile beside it,
+# which lacks the required `verify` target.
+apiVersion: idp.dev/v1
+kind: Service
+metadata:
+  name: missing-target
+  owner: platform
+  tier: 3
+  tracker: { kind: jira, site: suyashkunte.atlassian.net, project: IDP, labels: [repo:idp-platform] }
+spec:
+  type: web-api
+  target: kubernetes
+  build:
+    profile: python-uv
+  runtime:
+    port: 8000
+    health: { live: /healthz/live, ready: /healthz/ready, startup: /healthz/startup }
