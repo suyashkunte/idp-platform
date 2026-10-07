@@ -43,8 +43,8 @@ class Violation:
         return f"{self.path or '<root>'}: {self.message}"
 
 
-def load_schema() -> dict[str, Any]:
-    text = resources.files("idp_gate.schemas").joinpath(SCHEMA_NAME).read_text(encoding="utf-8")
+def load_schema(name: str = SCHEMA_NAME) -> dict[str, Any]:
+    text = resources.files("idp_gate.schemas").joinpath(name).read_text(encoding="utf-8")
     schema: dict[str, Any] = json.loads(text)
     return schema
 

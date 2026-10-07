@@ -8,7 +8,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from idp_gate import __version__, approve_spec, contract, spec_trace, test_quality
+import yaml
+
+from idp_gate import __version__, approve_spec, contract, profiles, spec_trace, test_quality
 
 
 def _cmd_spec_trace(args: argparse.Namespace) -> int:
@@ -57,6 +59,20 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 1 if violations else 0
 
 
+def _cmd_profile_show(args: argparse.Namespace) -> int:
+    try:
+        resolved = profiles.resolve(args.name)
+    except profiles.ProfileError as exc:
+        for line in exc.lines:
+            print(f"profile show: {line}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(resolved))
+    else:
+        print(yaml.safe_dump(resolved, sort_keys=False), end="")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="idp", description="Intelligent Delivery Pipeline CLI")
     parser.add_argument("--version", action="version", version=f"idp {__version__}")
@@ -81,6 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("file", nargs="?", default="idp.yaml")
     p.add_argument("--json", action="store_true", help="print a JSON object instead of text")
     p.set_defaults(func=_cmd_validate)
+
+    p = sub.add_parser("profile", help="inspect build profiles (ADR-0012)")
+    profile_sub = p.add_subparsers(dest="profile_command", required=True)
+    p = profile_sub.add_parser("show", help="print a resolved build profile")
+    p.add_argument("name")
+    p.add_argument("--json", action="store_true", help="print a JSON object instead of YAML")
+    p.set_defaults(func=_cmd_profile_show)
     return parser
 
 

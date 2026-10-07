@@ -1,0 +1,17 @@
+name: python-uv
+description: Python services and libraries managed with uv (pytest, Cobertura coverage, CycloneDX SBOM, pip-audit).
+setup:
+  - name: Install Python
+    run: uv python install
+  - name: Sync dependencies
+    run: uv sync --locked
+defaultTargets:
+  - sbom
+  - sca
+coverage:
+  format: cobertura
+sbom:
+  tool: cyclonedx-py
+  format: cyclonedx-json
+sca:
+  tool: pip-audit
