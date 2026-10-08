@@ -38,3 +38,6 @@ versions follow [Semantic Versioning](https://semver.org/).
   path parts ship, the sdist carries them under `build-profiles/`, and a wheel built from the sdist includes the same
   profiles as a direct wheel build. The sdist is allow-listed too (`only-include`: `src`, `tests`, `hatch_build.py`,
   `pyproject.toml`), so untracked files in `packages/idp-gate/` never ship.
+- IDP-24: idp-gate builds use a hashed build-constraints file generated from uv.lock (hatchling pinned and
+  hash-checked); test builds run without UV_*/PIP_* variables and user uv config; the build hook never follows
+  symlinked profile directories and fails closed when build-profiles itself is a symlink.

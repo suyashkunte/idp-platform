@@ -1,6 +1,9 @@
 """IDP-18: python-uv build profile, build-profile.v1 schema, discovery and `idp profile show`.
 
 IDP-21: reproducible tool resolution (`--exclude-newer`) and clean, sdist-safe packaging of the profiles.
+
+IDP-24: hashed build constraints for the build backend, a clean `uv build` environment, and no symlink following in
+the build hook.
 """
 
 import importlib
@@ -34,6 +37,8 @@ GENERATOR_AGENT = REPO / "plugins" / "idp-agentic" / "agents" / "unit-test-gener
 PACKAGE_DIR = REPO / "packages" / "idp-gate"
 PACKAGE_PYPROJECT = PACKAGE_DIR / "pyproject.toml"
 HATCH_BUILD = PACKAGE_DIR / "hatch_build.py"
+BUILD_CONSTRAINTS = PACKAGE_DIR / "build-constraints.txt"
+UV_LOCK = REPO / "uv.lock"
 SCHEMA_FILE = "build-profile.v1.json"
 
 GENERATOR_FRONTMATTER = (
@@ -823,6 +828,83 @@ def test_build_hook_fails_closed_on_unsupported_target(tmp_path: Path) -> None:
     assert build_data == {"force_include": {}}
 
 
+# --- IDP-24 AC-3 / AC-4: the build hook never follows symlinked directories ----------------------------------------
+
+
+@pytest.mark.ac("IDP-24:AC-3")
+def test_profile_file_selection_does_not_follow_symlinked_directories(tmp_path: Path) -> None:
+    hook = _hatch_build()
+    source = tmp_path / "build-profiles"
+    _files(source, ["python-uv/profile.yaml", "python-uv/defaults.mk", "python-uv/sub/.keep"])
+    outside = tmp_path / "outside"
+    _files(outside, ["x.md", "nested/y.yaml"])
+    (source / "python-uv" / "linked").symlink_to(outside, target_is_directory=True)
+    (source / "python-uv" / "sub" / "linked").symlink_to(outside, target_is_directory=True)
+    (source / "python-uv" / "alias").symlink_to(Path("..") / "python-uv", target_is_directory=True)
+    assert (source / "python-uv" / "linked" / "x.md").is_file()  # the link resolves: only the walk may skip it
+    assert hook.select_profile_files(source) == [Path("python-uv/defaults.mk"), Path("python-uv/profile.yaml")]
+
+
+@pytest.mark.ac("IDP-24:AC-4")
+def test_profiles_source_accepts_checkout_behind_symlinked_ancestor(tmp_path: Path) -> None:
+    """Only the candidate itself must not be a symlink; a symlinked ancestor (macOS /tmp, spec A7) is fine."""
+    hook = _hatch_build()
+    real = tmp_path / "real"
+    _files(real / "build-profiles", ["python-uv/profile.yaml"])
+    (real / "packages" / "idp-gate").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    assert hook.profiles_source(alias / "packages" / "idp-gate") == alias / "build-profiles"
+
+
+_SYMLINK_MESSAGE = "idp-gate build: build profiles source is a symlink, refusing to follow it: "
+
+
+def _symlinked_profiles_source(tmp_path: Path, layout: str, dangling: bool) -> tuple[Path, Path]:
+    """`(project root, the symlinked build-profiles candidate)` for one IDP-24 AC-4 layout.
+
+    - `checkout`: the checkout's `<root>/../../build-profiles` is a symlink, no sdist copy.
+    - `sdist`: an unpacked sdist (`PKG-INFO`) whose `<root>/build-profiles` is a symlink.
+    - `checkout-with-real-parent`: `<root>/build-profiles` is a symlink while the checkout's real
+      `<root>/../../build-profiles` exists; the hook must not fall back to it.
+    """
+    project = tmp_path / "packages" / "idp-gate"
+    project.mkdir(parents=True)
+    target = tmp_path / "elsewhere" / "profiles"
+    if not dangling:
+        _files(target, ["python-uv/profile.yaml", "python-uv/defaults.mk"])
+    link = tmp_path / "build-profiles" if layout == "checkout" else project / "build-profiles"
+    if layout == "sdist":
+        _files(project, ["PKG-INFO"])
+    if layout == "checkout-with-real-parent":
+        _files(tmp_path / "build-profiles", ["python-uv/profile.yaml"])
+    link.symlink_to(target, target_is_directory=True)
+    return project, link
+
+
+@pytest.mark.ac("IDP-24:AC-4")
+@pytest.mark.parametrize("dangling", [False, True], ids=["to-profiles-dir", "dangling"])
+@pytest.mark.parametrize("layout", ["checkout", "sdist", "checkout-with-real-parent"])
+def test_profiles_source_fails_closed_on_symlinked_source(tmp_path: Path, layout: str, dangling: bool) -> None:
+    hook = _hatch_build()
+    project, link = _symlinked_profiles_source(tmp_path, layout, dangling)
+    with pytest.raises(RuntimeError) as excinfo:
+        hook.profiles_source(project)
+    assert str(excinfo.value) == f"{_SYMLINK_MESSAGE}{link}"
+
+
+@pytest.mark.ac("IDP-24:AC-4")
+@pytest.mark.parametrize("target_name", ["wheel", "sdist"])
+def test_build_hook_fails_closed_on_symlinked_profiles_source(tmp_path: Path, target_name: str) -> None:
+    hook = _hatch_build()
+    project, link = _symlinked_profiles_source(tmp_path, "checkout", dangling=False)
+    build_data: dict[str, Any] = {"force_include": {}}
+    with pytest.raises(RuntimeError) as excinfo:
+        _build_hook(hook, project, target_name).initialize("standard", build_data)
+    assert str(excinfo.value) == f"{_SYMLINK_MESSAGE}{link}"
+    assert build_data == {"force_include": {}}
+
+
 # --- Session builds: one direct wheel, one sdist -> wheel, both from a temporary copy with stray files -------------
 
 
@@ -833,25 +915,67 @@ _SDIST_TOP_LEVEL = frozenset({"PKG-INFO", "pyproject.toml", "hatch_build.py", "s
 _IGNORE_BYTECODE = shutil.ignore_patterns("__pycache__", "*.pyc")
 
 
+# IDP-24 AC-2: location-only uv variables that may reach `uv build`; every other UV_*/PIP_* variable is stripped.
+_UV_ENV_KEEP = frozenset({"UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"})
+# IDP-24 AC-2 (spec A5): the session builds run with these in their base environment; they must never reach uv.
+_POLLUTED_ENV = {
+    "UV_INDEX_URL": "http://127.0.0.1:9/simple",
+    "UV_NO_BUILD_ISOLATION": "1",
+    "PIP_INDEX_URL": "http://127.0.0.1:9/simple",
+}
+
+
 @dataclass(frozen=True)
 class _Build:
-    """Outcome of one `uv build`; tests assert on it so a failed build is a test failure, not a fixture error."""
+    """Outcome of one `uv build`; tests assert on it so a failed build is a test failure, not a fixture error.
+
+    `env_names` and `base_env_names` hold variable NAMES only (never values), so no secret reaches test output.
+    """
 
     out_dir: Path
     returncode: int
     stderr: str
+    argv: tuple[str, ...]
+    env_names: frozenset[str]
+    base_env_names: frozenset[str]
+
+
+def _uv_build_env(base: dict[str, str]) -> dict[str, str]:
+    """The environment passed to `uv build`: `base` without UV_*/PIP_* variables, except the `_UV_ENV_KEEP` names."""
+    return {k: v for k, v in base.items() if k in _UV_ENV_KEEP or not k.startswith(("UV_", "PIP_"))}
+
+
+def _uv_build_argv(tree: Path, out_dir: Path, *flags: str) -> list[str]:
+    """The `uv build` command line used by both session builds."""
+    return [
+        "uv",
+        "build",
+        *flags,
+        "--offline",
+        "--no-config",
+        "--build-constraint",
+        str(BUILD_CONSTRAINTS),
+        "--require-hashes",
+        "--out-dir",
+        str(out_dir),
+        str(tree / "packages" / "idp-gate"),
+    ]
 
 
 def _uv_build(tree: Path, out_dir: Path, *flags: str) -> _Build:
+    base = dict(os.environ) | _POLLUTED_ENV  # IDP-24 spec A5: polluted on purpose, stripped by _uv_build_env
+    env = _uv_build_env(base)
+    argv = _uv_build_argv(tree, out_dir, *flags)
     result = subprocess.run(
-        ["uv", "build", *flags, "--offline", "--out-dir", str(out_dir), str(tree / "packages" / "idp-gate")],
+        argv,
         cwd=tree,
+        env=env,
         capture_output=True,
         text=True,
         timeout=300,
         check=False,
     )
-    return _Build(out_dir, result.returncode, result.stderr)
+    return _Build(out_dir, result.returncode, result.stderr, tuple(argv), frozenset(env), frozenset(base))
 
 
 @pytest.fixture(scope="session")
@@ -1006,6 +1130,138 @@ def test_profile_show_works_from_sdist_built_wheel(sdist_built_wheel: _Build, tm
     assert '"name": "python-uv"' in result.stdout
     shown = json.loads(result.stdout)
     assert shown["dir"] == str(site / "idp_gate" / "build_profiles" / "python-uv")
+
+
+# --- IDP-24 AC-1 / AC-2: locked, hash-checked build backend and a clean `uv build` environment ---------------------
+
+
+_REGENERATE_CONSTRAINTS = (
+    "uv export --frozen --package idp-gate --only-group dev --no-emit-project "
+    "--output-file packages/idp-gate/build-constraints.txt"
+)
+_Pins = dict[str, tuple[str, frozenset[str]]]
+
+
+def _normalize(name: str) -> str:
+    return name.strip().lower().replace("_", "-").replace(".", "-")
+
+
+def _locked_closure(root: str = "hatchling") -> _Pins:
+    """`{name: (version, {"sha256:..."})}` for `root` and its transitive dependencies, as recorded in uv.lock."""
+    packages: dict[str, list[dict[str, Any]]] = {}
+    for package in tomllib.loads(UV_LOCK.read_text())["package"]:
+        packages.setdefault(_normalize(package["name"]), []).append(package)
+    closure: _Pins = {}
+    pending = [_normalize(root)]
+    while pending:
+        name = pending.pop()
+        if name in closure:
+            continue
+        entries = packages.get(name, [])
+        assert len(entries) == 1, f"uv.lock must lock exactly one {name}, found {len(entries)}"
+        entry = entries[0]
+        artifacts = [entry["sdist"]] if "sdist" in entry else []
+        artifacts += entry.get("wheels", [])
+        closure[name] = (entry["version"], frozenset(a["hash"] for a in artifacts))
+        pending += [_normalize(dep["name"]) for dep in entry.get("dependencies", [])]
+    return closure
+
+
+def _constraints() -> _Pins:
+    """`{name: (version, {"sha256:..."})}` parsed from build-constraints.txt (continuations joined, markers ignored)."""
+    pins: _Pins = {}
+    for line in BUILD_CONSTRAINTS.read_text().replace("\\\n", " ").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        requirement, *options = line.split()
+        name, sep, version = requirement.partition("==")
+        assert sep == "==", f"not an exact pin in build-constraints.txt: {requirement}"
+        hashes = frozenset(o.removeprefix("--hash=") for o in options if o.startswith("--hash="))
+        assert _normalize(name) not in pins, f"duplicate entry in build-constraints.txt: {_normalize(name)}"
+        pins[_normalize(name)] = (version.split(";", 1)[0], hashes)
+    return pins
+
+
+def _wheel_generator(build: _Build) -> list[str]:
+    with zipfile.ZipFile(build.out_dir / "idp_gate-0.1.0-py3-none-any.whl") as zf:
+        lines = zf.read("idp_gate-0.1.0.dist-info/WHEEL").decode().splitlines()
+    return [line for line in lines if line.startswith("Generator:")]
+
+
+def _stray_uv_pip_names(names: frozenset[str]) -> list[str]:
+    return sorted(n for n in names if n.startswith(("UV_", "PIP_")) and n not in _UV_ENV_KEEP)
+
+
+@pytest.mark.ac("IDP-24:AC-1")
+def test_build_constraints_pin_locked_build_backend_with_hashes() -> None:
+    assert BUILD_CONSTRAINTS.is_file(), (
+        f"packages/idp-gate/build-constraints.txt is missing (IDP-24 AC-1); generate it with: {_REGENERATE_CONSTRAINTS}"
+    )
+    locked = _locked_closure()
+    assert "hatchling" in locked
+    assert all(hashes for _, hashes in locked.values())
+    drift = f"build-constraints.txt drifted from uv.lock; regenerate: {_REGENERATE_CONSTRAINTS}"
+    assert _constraints() == locked, drift
+
+
+@pytest.mark.ac("IDP-24:AC-1")
+def test_session_builds_use_hashed_build_constraints(built_wheel: _Build, sdist_built_wheel: _Build) -> None:
+    for build in (built_wheel, sdist_built_wheel):
+        argv = list(build.argv)
+        assert "--build-constraint" in argv, f"uv build ran without --build-constraint: {argv}"
+        assert argv[argv.index("--build-constraint") + 1] == str(BUILD_CONSTRAINTS)
+        assert "--require-hashes" in argv, f"uv build ran without --require-hashes: {argv}"
+        assert "--offline" in argv
+        assert "--no-config" in argv, f"uv build ran without --no-config: {argv}"
+
+
+@pytest.mark.ac("IDP-24:AC-1")
+def test_session_wheels_are_built_by_locked_hatchling(built_wheel: _Build, sdist_built_wheel: _Build) -> None:
+    locked_version = _locked_closure()["hatchling"][0]
+    for build in (built_wheel, sdist_built_wheel):
+        assert build.returncode == 0, build.stderr
+        assert _wheel_generator(build) == [f"Generator: hatchling {locked_version}"]
+
+
+@pytest.mark.ac("IDP-24:AC-2")
+def test_uv_build_env_strips_uv_and_pip_variables(monkeypatch: pytest.MonkeyPatch) -> None:
+    stripped = {
+        "UV_INDEX_URL": "http://127.0.0.1:9/simple",
+        "UV_NO_BUILD_ISOLATION": "1",
+        "PIP_INDEX_URL": "http://127.0.0.1:9/simple",
+        "UV_EXTRA_INDEX_URL": "http://127.0.0.1:9/extra",
+        "UV_EXCLUDE_NEWER": "2020-01-01T00:00:00Z",
+        "PIP_CONSTRAINT": "/nonexistent/constraints.txt",
+    }
+    for name in [n for n in os.environ if n.startswith(("UV_", "PIP_"))]:  # e.g. set by `uv run`
+        monkeypatch.delenv(name)
+    for name, value in stripped.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("UV_CACHE_DIR", "/nonexistent/uv-cache")
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", "/nonexistent/uv-python")
+    monkeypatch.setenv("IDP24_UNRELATED", "kept")
+    base = dict(os.environ)
+    env = _uv_build_env(base)
+    assert sorted(set(stripped) & set(env)) == []
+    assert env["UV_CACHE_DIR"] == "/nonexistent/uv-cache"
+    assert env["UV_PYTHON_INSTALL_DIR"] == "/nonexistent/uv-python"
+    assert env["IDP24_UNRELATED"] == "kept"
+    assert env["PATH"] == os.environ["PATH"]
+    # expected result derived from the names this test set, not from _uv_build_env's predicate
+    clean = {k: v for k, v in base.items() if k not in stripped}
+    polluted_env = _uv_build_env(base | _POLLUTED_ENV)
+    # compare by name only, so a failing assertion never prints environment values
+    assert sorted(n for n in env.keys() | clean.keys() if env.get(n) != clean.get(n)) == []
+    assert sorted(n for n in polluted_env.keys() | clean.keys() if polluted_env.get(n) != clean.get(n)) == []
+
+
+@pytest.mark.ac("IDP-24:AC-2")
+def test_session_builds_ran_without_uv_and_pip_variables(built_wheel: _Build, sdist_built_wheel: _Build) -> None:
+    for build in (built_wheel, sdist_built_wheel):
+        assert build.returncode == 0, build.stderr
+        assert sorted(set(_POLLUTED_ENV) - build.base_env_names) == [], "session builds must start from _POLLUTED_ENV"
+        assert _stray_uv_pip_names(build.env_names) == []
 
 
 # --- AC-5: exit 2 with the profile name and the reason ------------------------------------------------------------
