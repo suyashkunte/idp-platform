@@ -11,6 +11,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1168,19 +1169,32 @@ def _locked_closure(root: str = "hatchling") -> _Pins:
     return closure
 
 
-def _constraints() -> _Pins:
-    """`{name: (version, {"sha256:..."})}` parsed from build-constraints.txt (continuations joined, markers ignored)."""
+def _parse_constraints(text: str) -> tuple[_Pins, list[str]]:
+    """`{name: (version, {"sha256:..."})}` parsed from build-constraints.txt text (continuations joined, markers
+    ignored), plus a problem for each line that is not an exact `==` pin or repeats a name."""
     pins: _Pins = {}
-    for line in BUILD_CONSTRAINTS.read_text().replace("\\\n", " ").splitlines():
+    problems: list[str] = []
+    for line in text.replace("\\\n", " ").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         requirement, *options = line.split()
         name, sep, version = requirement.partition("==")
-        assert sep == "==", f"not an exact pin in build-constraints.txt: {requirement}"
+        if sep != "==":
+            problems.append(f"{requirement!r} {_NOT_EXACT}")
+            continue
+        if _normalize(name) in pins:
+            problems.append(f"duplicate entry for {_normalize(name)}")
+            continue
         hashes = frozenset(o.removeprefix("--hash=") for o in options if o.startswith("--hash="))
-        assert _normalize(name) not in pins, f"duplicate entry in build-constraints.txt: {_normalize(name)}"
         pins[_normalize(name)] = (version.split(";", 1)[0], hashes)
+    return pins, problems
+
+
+def _constraints() -> _Pins:
+    """`{name: (version, {"sha256:..."})}` parsed from build-constraints.txt (continuations joined, markers ignored)."""
+    pins, problems = _parse_constraints(BUILD_CONSTRAINTS.read_text())
+    assert problems == [], f"build-constraints.txt: {'; '.join(problems)}"
     return pins
 
 
@@ -1309,6 +1323,101 @@ _FILE = (
 )
 _ROOT = ["hatchling==1.32.4", "packaging==26.3"]
 _RECORDED = [{"name": "hatchling", "specifier": "==1.32.4"}, {"name": "packaging", "specifier": "==26.3"}]
+
+_EXACT_PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9.+!_-]*)$")  # no markers/extras/ranges
+_ROOT_SOURCE = "root pyproject.toml"
+
+
+def _parse_exact_pins(entries: object, source: str) -> tuple[dict[str, str], list[str]]:
+    """`{name: version}` from a list of `name==version` strings, plus a problem for every entry that is not one."""
+    if not isinstance(entries, list):
+        return {}, [f"{source}: expected a list of strings, got {type(entries).__name__}"]
+    pins: dict[str, str] = {}
+    problems: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, str):
+            problems.append(f"{source}: entry {entry!r} is not a string")
+            continue
+        match = _EXACT_PIN.match(entry.strip())
+        if match is None:
+            problems.append(f"{entry!r} {_NOT_EXACT}")
+            continue
+        name = _normalize(match.group(1))
+        if name in pins:
+            problems.append(f"{source}: duplicate entry for {name}")
+            continue
+        pins[name] = match.group(2)
+    return pins, problems
+
+
+def _compare(reference: dict[str, str], actual: dict[str, str], reference_name: str = "uv.lock") -> list[str]:
+    """Differences of `actual` from `reference`: missing and extra pins and differing versions, sorted by name."""
+    differences: list[str] = []
+    for name in sorted(reference.keys() | actual.keys()):
+        if name not in actual:
+            differences.append(f"missing {name}=={reference[name]}")
+        elif name not in reference:
+            differences.append(f"extra {name}=={actual[name]}")
+        elif actual[name] != reference[name]:
+            differences.append(f"{name}: {actual[name]}, {reference_name} has {reference[name]}")
+    return differences
+
+
+def _file_drift(locked: _Pins, constraints_text: str) -> list[str]:
+    pins, problems = _parse_constraints(constraints_text)
+    differences = problems + _compare({n: v for n, (v, _) in locked.items()}, {n: v for n, (v, _) in pins.items()})
+    differences += [
+        f"{name}: hashes differ from uv.lock"
+        for name in sorted(locked.keys() & pins.keys())
+        if locked[name][0] == pins[name][0] and locked[name][1] != pins[name][1]
+    ]
+    if not differences:
+        return []
+    return [f"{_FILE_STALE}: {'; '.join(differences)}; regenerate: {_REGENERATE_CONSTRAINTS}"]
+
+
+def _root_drift(versions: dict[str, str], root_entries: object | None) -> tuple[dict[str, str] | None, list[str]]:
+    """Root pins when they are well formed (else None), and the root list's problems with the human remedy."""
+    expected = ", ".join(f'"{name}=={version}"' for name, version in sorted(versions.items()))
+    remedy = f"{_ROOT_REMEDY} [{expected}], then run: uv lock"
+    if root_entries is None:
+        return None, [f"{_ROOT_ABSENT}; {remedy}"]
+    pins, problems = _parse_exact_pins(root_entries, _ROOT_SOURCE)
+    differences = problems + _compare(versions, pins)
+    if not differences:
+        return pins, []
+    return (None if problems else pins), [f"{_ROOT_STALE}: {'; '.join(differences)}; {remedy}"]
+
+
+def _lock_record_drift(root_pins: dict[str, str], lock_recorded: object) -> list[str]:
+    """Compare uv.lock `[manifest] build-constraints` (`[{name, specifier}]`) with the root list."""
+    entries = lock_recorded
+    if isinstance(lock_recorded, list):
+        entries = [
+            f"{e['name']}{e['specifier']}"
+            if isinstance(e, dict) and isinstance(e.get("name"), str) and isinstance(e.get("specifier"), str)
+            else e
+            for e in lock_recorded
+        ]
+    pins, problems = _parse_exact_pins(entries, "uv.lock [manifest] build-constraints")
+    differences = problems + _compare(root_pins, pins, reference_name="pyproject.toml")
+    return [f"{_LOCK_STALE} ({'; '.join(differences)})"] if differences else []
+
+
+def _build_constraint_drift(
+    locked: _Pins, constraints_text: str, root_entries: object | None, lock_recorded: object | None = None
+) -> list[str]:
+    """Problems where build-constraints.txt, the root build-constraint-dependencies list or uv.lock's record of it
+    disagree with the hatchling closure locked in uv.lock (the reference); each names the stale source and its fix."""
+    versions = {name: version for name, (version, _) in locked.items()}
+    problems = _file_drift(locked, constraints_text)
+    root_pins, root_problems = _root_drift(versions, root_entries)
+    problems += root_problems
+    if lock_recorded is not None and root_pins is not None:
+        problems += _lock_record_drift(root_pins, lock_recorded)
+    if problems:
+        problems.append(f"To bump hatchling on purpose: {_BUMP_HINT}, then update both derived sources as above.")
+    return problems
 
 
 @dataclass(frozen=True)
