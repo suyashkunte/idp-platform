@@ -241,3 +241,31 @@ def test_root_make_verify_runs_conformance() -> None:
     prerequisites = verify[0].split("##", 1)[0].split(":", 1)[1].split()
     assert "conformance" in prerequisites, f"verify prerequisites are {prerequisites}"
     assert "\t$(UV) run idp conformance examples" in lines
+
+
+# --- IDP-22 AC-1: a GNUmakefile beside a valid Makefile makes conformance fail ------------------------------------
+
+
+@needs_make
+@pytest.mark.ac("IDP-22:AC-1")
+def test_conformance_fails_example_with_gnumakefile_bypass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _require_example()
+    examples = tmp_path / "examples"
+    _copy_into(examples, EXAMPLE, "minimal-service")
+    _copy_into(examples, FIXTURES / "gnumakefile-bypass", "gnumakefile-bypass")
+    monkeypatch.chdir(tmp_path)
+    for name in MAKE_ENV_STRIPPED:
+        monkeypatch.delenv(name, raising=False)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/gnumakefile-bypass: idp validate: 1 violation(s)\n"
+        "    GNUmakefile: GNU make reads this file before Makefile, but only Makefile is validated;"
+        " remove or rename it\n"
+        "PASS examples/minimal-service\n"
+        "conformance: 1 passed, 1 failed\n"
+    )
+    assert code == 1

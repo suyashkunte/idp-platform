@@ -1,6 +1,8 @@
 """IDP-19: `idp conformance [DIR]` runs `idp validate` and `make verify` for every example with an `idp.yaml`."""
 
+import ast
 import importlib
+import inspect
 import os
 import shutil
 import signal
@@ -8,11 +10,12 @@ import subprocess
 import time
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 import yaml
 
+from idp_gate import contract, profiles
 from idp_gate.cli import main
 
 REQUIRED_TARGETS = ("lint", "test", "test-component", "verify", "spec-trace")
@@ -178,9 +181,9 @@ def test_conformance_reports_make_timeout(
     assert code == 1
     assert len(calls) == 1
     argv, kwargs = calls[0]
-    assert argv[1:5] == ["--no-print-directory", "-C", "examples/slow", "verify"]
-    assert argv[5].startswith("IDP_PROFILE_DIR=")
-    assert argv[5].endswith("python-uv")
+    assert argv[1:7] == ["--no-print-directory", "-C", "examples/slow", "-f", "Makefile", "verify"]
+    assert argv[7].startswith("IDP_PROFILE_DIR=")
+    assert argv[7].endswith("python-uv")
     assert kwargs["start_new_session"] is True
     assert [name for name in STRIPPED_MAKE_VARS if name in kwargs["env"]] == []
     assert timeouts == [60, None]
@@ -349,3 +352,212 @@ def test_conformance_without_make_exits_2(
     assert err == "conformance: make not found on PATH\n"
     assert out == ""
     assert code == 2
+
+
+# --- IDP-22 ------------------------------------------------------------------------------------------------------
+
+
+def _fake_make_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An executable `make` stub as the only thing on PATH (for tests that fake Popen and never run make)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    make = bin_dir / "make"
+    make.write_text("#!/bin/sh\nexit 0\n")
+    make.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    return make
+
+
+class _RecordingPopen:
+    """Fake Popen: records argv/kwargs in `calls` and exits 0 without running anything."""
+
+    calls: ClassVar[list[tuple[list[str], dict[str, Any]]]] = []
+    pid = 434343
+    returncode = 0
+
+    def __init__(self, argv: list[str], **kwargs: Any) -> None:
+        type(self).calls.append((list(argv), kwargs))
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, None]:
+        return "", None
+
+
+def _recording_popen(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict[str, Any]]]:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+    monkeypatch.setattr(_RecordingPopen, "calls", calls)
+    monkeypatch.setattr(_conformance().subprocess, "Popen", _RecordingPopen)
+    return calls
+
+
+@pytest.mark.ac("IDP-22:AC-2")
+def test_make_verify_is_invoked_with_f_makefile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_example(tmp_path / "examples", "okay")
+    make = _fake_make_on_path(tmp_path, monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/okay\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv[:7] == [str(make), "--no-print-directory", "-C", "examples/okay", "-f", "Makefile", "verify"]
+    assert len(argv) == 8
+    assert argv[7].startswith("IDP_PROFILE_DIR=")
+    assert argv[7].endswith("python-uv")
+    assert kwargs["start_new_session"] is True
+
+
+def _case_sensitive(directory: Path) -> bool:
+    """True if `directory` is on a case-sensitive filesystem (Linux CI), False on case-insensitive APFS (macOS)."""
+    probe = directory / "probe"
+    probe.write_text("")
+    sensitive = not (directory / "PROBE").exists()
+    probe.unlink()
+    return sensitive
+
+
+@needs_make
+@pytest.mark.ac("IDP-22:AC-2")
+def test_make_verify_ignores_gnumakefile_and_makefile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    conformance = _conformance()
+    directory = _write_example(tmp_path / "examples", "shadowed", verify="@exit 3")
+    (directory / "GNUmakefile").write_text("verify:\n\t@true\n")
+    if _case_sensitive(directory):  # `makefile` would be the same file as `Makefile` on APFS
+        (directory / "makefile").write_text("verify:\n\t@true\n")
+    for name in STRIPPED_MAKE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    make = shutil.which("make")
+    assert make is not None
+
+    result = conformance._run_make_verify(directory, make, str(tmp_path))
+
+    assert result.ok is False
+    assert result.reason == "make verify exited 2"
+
+
+@needs_make
+@pytest.mark.ac("IDP-22:AC-3")
+def test_conformance_fails_symlinked_example_without_running_make(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    examples = tmp_path / "examples"
+    _write_example(examples, "real")
+    outside = _write_example(tmp_path / "outside", "svc", verify="@touch make-ran", doc=_doc("linked"))
+    (examples / "linked").symlink_to(outside)
+    (examples / "alias").symlink_to("real")  # relative link to an example inside DIR: still refused
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/alias: outside examples directory\n"
+        "FAIL examples/linked: outside examples directory\n"
+        "PASS examples/real\n"
+        "conformance: 1 passed, 2 failed\n"
+    )
+    assert code == 1
+    assert not (outside / "make-ran").exists()
+
+
+@pytest.mark.ac("IDP-22:AC-3")
+@pytest.mark.parametrize("mode", ["elsewhere", "unresolvable"], ids=["resolves-outside", "resolve-raises"])
+def test_conformance_fails_example_resolving_outside_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: str
+) -> None:
+    _write_example(tmp_path / "examples", "odd", verify="@touch make-ran")
+    elsewhere = tmp_path / "elsewhere" / "odd"
+    elsewhere.mkdir(parents=True)
+    original = Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if strict and self.name == "odd" and self.parent.name == "examples":
+            if mode == "unresolvable":
+                raise RuntimeError("Symlink loop")
+            return elsewhere
+        return original(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    _fake_make_on_path(tmp_path, monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/odd: outside examples directory\nconformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert calls == []
+
+
+@needs_make
+@pytest.mark.ac("IDP-22:AC-3")
+def test_conformance_accepts_real_examples_under_symlinked_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_example(tmp_path / "examples", "real")
+    (tmp_path / "linkdir").symlink_to("examples")
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "linkdir"])
+
+    assert capsys.readouterr().out == "PASS linkdir/real\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+
+
+@pytest.mark.ac("IDP-22:AC-4")
+def test_check_example_parses_idp_yaml_once_for_validation_and_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    conformance = _conformance()
+    _write_example(tmp_path / "examples", "okay")
+    parsed: list[str] = []
+    resolved: list[str] = []
+    original_load = contract._load_yaml
+    original_resolve = profiles.resolve
+
+    def counting_load(path: Path) -> tuple[Any, list[contract.Violation]]:
+        parsed.append(str(path))
+        return original_load(path)
+
+    def recording_resolve(name: str) -> Any:
+        resolved.append(name)
+        return original_resolve(name)
+
+    def stub_make(directory: Path, make: str, profile_dir: str) -> Any:
+        return conformance.Result(directory, ok=True)
+
+    monkeypatch.setattr(contract, "_load_yaml", counting_load)
+    monkeypatch.setattr(profiles, "resolve", recording_resolve)
+    monkeypatch.setattr(conformance, "_run_make_verify", stub_make)
+    _fake_make_on_path(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/okay\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert [p for p in parsed if p.endswith("idp.yaml")] == ["examples/okay/idp.yaml"]
+    assert resolved == ["python-uv"]
+
+
+@pytest.mark.ac("IDP-22:AC-4")
+def test_conformance_module_uses_no_private_contract_members() -> None:
+    source_file = inspect.getsourcefile(_conformance())
+    assert source_file is not None
+    tree = ast.parse(Path(source_file).read_text(encoding="utf-8"))
+
+    private = sorted(
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "contract"
+        and node.attr.startswith("_")
+    )
+
+    assert private == []
