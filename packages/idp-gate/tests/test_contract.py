@@ -430,7 +430,8 @@ def test_too_many_include_words_is_a_violation(
     assert _make_messages(tmp_path, monkeypatch, capsys) == ["too many include words (limit 1024)"]
     _write_makefile(tmp_path)
     with (tmp_path / "Makefile").open("a") as fh:
-        fh.write(f"-include {' '.join(words[:-1])} ./missing0.mk\n")  # 1024 distinct words (./ normalised) is fine
+        # 1024 distinct spellings is fine; a repeated spelling is not counted again (IDP-22 AC-5 caps spellings)
+        fh.write(f"-include {' '.join(words[:-1])} missing0.mk\n")
     assert contract.makefile_targets(tmp_path / "Makefile").violations == ()
 
 
@@ -687,3 +688,284 @@ def test_missing_makefile_reported_alongside_schema_violations(
     out = capsys.readouterr().out
     assert out.startswith("idp.yaml: <root>: invalid YAML: ")
     assert "Makefile" not in out
+
+
+# --- IDP-22: a GNUmakefile/makefile beside Makefile would be read by GNU make instead ----------------------------
+
+EXTRA_MAKEFILE = "GNU make reads this file before Makefile, but only Makefile is validated; remove or rename it"
+
+
+def _case_sensitive(directory: Path) -> bool:
+    """True if `directory` is on a case-sensitive filesystem (Linux CI), False on case-insensitive APFS (macOS)."""
+    probe = directory / "probe"
+    probe.write_text("")
+    sensitive = not (directory / "PROBE").exists()
+    probe.unlink()
+    return sensitive
+
+
+@pytest.mark.ac("IDP-22:AC-1")
+@pytest.mark.parametrize("name", ["GNUmakefile", "makefile"], ids=["gnumakefile", "lowercase-makefile"])
+def test_extra_gnumakefile_or_makefile_beside_valid_makefile_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    _write_idp(tmp_path)
+    makefile = _write_makefile(tmp_path)
+    if name == "GNUmakefile" or _case_sensitive(tmp_path):
+        (tmp_path / name).write_text(makefile.read_text())
+    else:
+        # `Makefile` and `makefile` cannot both exist: store the valid file lowercase (it still opens as Makefile).
+        makefile.rename(tmp_path / name)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate"])
+
+    assert capsys.readouterr().out == f"idp.yaml: {name}: {EXTRA_MAKEFILE}\n"
+    assert code == 1
+
+
+@pytest.mark.ac("IDP-22:AC-1")
+def test_extra_makefile_names_match_case_insensitively(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path)
+    (tmp_path / "GnuMakefile").mkdir()  # entry type does not matter: a directory is reported too
+    for harmless in ("Makefile.bak", "GNUmakefile.orig", "common.mk"):
+        (tmp_path / harmless).write_text("verify:\n\t@true\n")
+    expected = ["GnuMakefile"]
+    if _case_sensitive(tmp_path):  # spellings that would collide with Makefile/GnuMakefile on APFS
+        (tmp_path / "gnumakefile").write_text("verify:\n\t@true\n")
+        (tmp_path / "MAKEFILE").write_text("verify:\n\t@true\n")
+        (tmp_path / "makefile").symlink_to(tmp_path / "missing.mk")  # dangling symlink
+        expected = ["GnuMakefile", "MAKEFILE", "gnumakefile", "makefile"]
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate", "--json"])
+
+    violations = json.loads(capsys.readouterr().out)["violations"]
+    assert violations == [{"path": name, "message": EXTRA_MAKEFILE} for name in expected]
+    assert code == 1
+
+
+@pytest.mark.ac("IDP-22:AC-1")
+def test_extra_makefile_names_are_compared_as_listed_on_every_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    makefile = _write_makefile(tmp_path)
+    original = os.listdir
+    listed = ["common.mk", "Makefile", "MakeFile", "Makefile.bak", "MAKEFILE"]
+
+    def fake_listdir(path: Any = ".") -> list[str]:
+        if Path(path).resolve() == tmp_path.resolve():
+            return list(listed)
+        return original(path)
+
+    monkeypatch.setattr("idp_gate.contract.os.listdir", fake_listdir)
+
+    violations = contract.check_make_contract(_doc_example(), makefile)
+
+    assert violations == [
+        contract.Violation("MAKEFILE", EXTRA_MAKEFILE),
+        contract.Violation("MakeFile", EXTRA_MAKEFILE),
+    ]
+
+
+@pytest.mark.ac("IDP-22:AC-1")
+def test_extra_makefile_check_fails_closed_when_directory_cannot_be_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path)
+    original = os.listdir
+
+    def fake_listdir(path: Any = ".") -> list[str]:
+        if Path(path).resolve() == tmp_path.resolve():
+            raise PermissionError(13, "Permission denied", str(path))
+        return original(path)
+
+    monkeypatch.setattr("idp_gate.contract.os.listdir", fake_listdir)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate"])
+
+    assert capsys.readouterr().out == "idp.yaml: Makefile: cannot list the service directory\n"
+    assert code == 1
+
+
+@pytest.mark.ac("IDP-22:AC-1")
+def test_extra_makefile_violation_in_json_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    _write_makefile(tmp_path, tuple(t for t in ALL_TARGETS if t != "test-component"))
+    (tmp_path / "GNUmakefile").write_text("include Makefile\n")
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate", "--json"])
+
+    assert json.loads(capsys.readouterr().out) == {
+        "file": "idp.yaml",
+        "valid": False,
+        "schema": "idp-service.v1",
+        "violations": [
+            {"path": "GNUmakefile", "message": EXTRA_MAKEFILE},
+            {"path": "Makefile", "message": "missing required target 'test-component'"},
+        ],
+    }
+    assert code == 1
+
+
+# --- IDP-22 AC-5: the scan records every literal include word as written (conformance pins them) -----------------
+
+
+@pytest.mark.ac("IDP-22:AC-5")
+def test_makefile_scan_records_literal_include_words_as_written(tmp_path: Path) -> None:
+    makefile = tmp_path / "Makefile"
+    makefile.write_text(
+        "include common.mk ./common.mk\n"
+        "-include gen.mk\n"  # missing on disk: recorded anyway (a rule could generate it)
+        "sinclude sub/x.mk\n"
+        "include $(V)/d.mk\n"  # dynamic: not scanned, not recorded
+        "include *.mk\n"  # glob: not scanned, not recorded
+        "lint:\n\t@true\n"
+    )
+    (tmp_path / "common.mk").write_text("include gen.mk\nverify:\n\t@true\n")  # gen.mk again: recorded once
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "x.mk").write_text("test:\n\t@true\n")
+
+    scan = contract.makefile_targets(makefile)
+
+    assert scan.include_words == ("common.mk", "./common.mk", "gen.mk", "sub/x.mk")
+    assert scan.targets == {"lint", "verify", "test"}
+    assert scan.violations == ()
+
+
+@pytest.mark.ac("IDP-22:AC-5")
+@pytest.mark.parametrize(
+    ("count", "violations"),
+    [(1024, ()), (1025, (contract.Violation("Makefile", "too many include words (limit 1024)"),))],
+    ids=["at-limit", "over-limit"],
+)
+def test_makefile_scan_caps_recorded_include_spellings(
+    tmp_path: Path, count: int, violations: tuple[contract.Violation, ...]
+) -> None:
+    (tmp_path / "a.mk").write_text("verify:\n\t@true\n")
+    # Distinct spellings of the same file: one normalised path, so only the spelling cap can trigger.
+    words = ["a.mk", *(f"d{i}/../a.mk" for i in range(count - 1))]
+    makefile = tmp_path / "Makefile"
+    makefile.write_text(f"include {' '.join(words)}\nlint:\n\t@true\n")
+
+    scan = contract.makefile_targets(makefile)
+
+    assert scan.violations == violations
+    assert len(scan.include_words) == 1024
+
+
+# --- IDP-22 AC-6: an idp.yaml that cannot be read or decoded is a violation, not a traceback ----------------------
+
+
+@pytest.mark.ac("IDP-22:AC-6")
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    [
+        ("not-utf8", "cannot read: not valid UTF-8 (invalid continuation byte at byte 9)"),
+        ("permission", "cannot read: Permission denied"),
+        ("no-strerror", "cannot read: boom"),
+    ],
+    ids=["undecodable", "unreadable", "oserror-no-strerror"],
+)
+def test_unreadable_or_undecodable_idp_yaml_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], kind: str, message: str
+) -> None:
+    _write_makefile(tmp_path)
+    if kind == "not-utf8":
+        (tmp_path / "idp.yaml").write_bytes(b"name: caf\xe9\n")
+    else:
+        _write_idp(tmp_path)
+        error = PermissionError(13, "Permission denied", "idp.yaml") if kind == "permission" else OSError("boom")
+
+        def failing(path: Path) -> tuple[Any, list[contract.Violation]]:
+            raise error
+
+        monkeypatch.setattr(contract, "_load_yaml", failing)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate"])
+
+    assert capsys.readouterr().out == f"idp.yaml: <root>: {message}\n"
+    assert code == 1
+    assert _run(["validate", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["violations"] == [{"path": "", "message": message}]
+
+
+@pytest.mark.ac("IDP-22:AC-6")
+def test_deeply_nested_idp_yaml_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_makefile(tmp_path)
+    (tmp_path / "idp.yaml").write_text("[" * 100000)  # the parser stops at the recursion limit, not at the end
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate"])
+
+    assert capsys.readouterr().out == "idp.yaml: <root>: cannot parse: nesting too deep\n"
+    assert code == 1
+    assert _run(["validate", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["violations"] == [
+        {"path": "", "message": "cannot parse: nesting too deep"}
+    ]
+
+
+# --- IDP-22 AC-7: include lines with a backslash (continuation or escape) are violations -------------------------
+
+BACKSLASH_INCLUDE = "uses a backslash (continuation or escape); write each include word literally on one line"
+
+
+@pytest.mark.ac("IDP-22:AC-7")
+@pytest.mark.parametrize(
+    ("extra", "common", "out", "code"),
+    [
+        (
+            "-include common.mk \\\n  gen.mk\n",
+            "COMMON := 1\n",
+            f"idp.yaml: Makefile: include line in 'Makefile' {BACKSLASH_INCLUDE}\n",
+            1,
+        ),
+        (
+            "-include gen\\#.mk\n",
+            "COMMON := 1\n",
+            f"idp.yaml: Makefile: include line in 'Makefile' {BACKSLASH_INCLUDE}\n",
+            1,
+        ),
+        (
+            "include common.mk\n",
+            "sinclude x\\ y.mk\n",
+            f"idp.yaml: Makefile: include line in 'common.mk' {BACKSLASH_INCLUDE}\n",
+            1,
+        ),
+        ("include common.mk # see notes \\\n", "COMMON := 1\n", "idp.yaml: valid (idp-service.v1.json)\n", 0),
+    ],
+    ids=["continuation", "escape", "in-include", "comment-only"],
+)
+def test_include_line_with_backslash_is_a_violation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: str,
+    common: str,
+    out: str,
+    code: int,
+) -> None:
+    _write_idp(tmp_path)
+    makefile = _write_makefile(tmp_path)
+    makefile.write_text(makefile.read_text() + extra)
+    (tmp_path / "common.mk").write_text(common)
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = _run(["validate"])
+
+    assert capsys.readouterr().out == out
+    assert exit_code == code
+    # The words of an offending line are not queued, so they are not recorded (nor pinned) either.
+    assert "gen\\#.mk" not in contract.makefile_targets(makefile).include_words

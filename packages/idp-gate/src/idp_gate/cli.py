@@ -89,7 +89,7 @@ def _cmd_conformance(args: argparse.Namespace) -> int:
         return 2
     failed = 0
     for example in examples:
-        result = conformance.check_example(example, make)
+        result = conformance.check_example(example, make, root)
         failed += not result.ok
         print("\n".join(result.lines()), flush=True)
     print(f"conformance: {len(examples) - failed} passed, {failed} failed")

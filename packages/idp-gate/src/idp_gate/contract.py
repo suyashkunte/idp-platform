@@ -20,6 +20,8 @@ MAKE_PATH = "Makefile"
 REQUIRED_TARGETS = ("lint", "test", "test-component", "verify", "spec-trace")
 TEST_KINDS = ("smoke", "api", "e2e", "perf")
 _INCLUDE_DIRECTIVES = frozenset({"include", "-include", "sinclude"})
+# Casefolded names GNU make reads before `Makefile`; such an entry beside the validated Makefile would shadow it.
+_SHADOWING_MAKEFILES = frozenset({"gnumakefile", "makefile"})
 # After the rule colon: `[export|override|private ...] VAR <op>` makes it a target-specific variable line.
 _TARGET_VARIABLE = re.compile(r"\s*(?:(?:export|override|private)\s+)*[^\s:=#;]+\s*(?::{1,3}|[+?!])?=")
 # `define NAME` starts a block; `define := x` (a variable named `define`) does not.
@@ -73,14 +75,20 @@ class MakefileScan:
 
     targets: frozenset[str]
     violations: tuple[Violation, ...]
+    include_words: tuple[str, ...] = ()  # distinct literal include words as written, in first-seen order
+
+
+def _is_include_line(line: str) -> bool:
+    """True if the first word of `line` is `include`, `-include` or `sinclude`."""
+    words = line.split(maxsplit=1)
+    return bool(words) and words[0] in _INCLUDE_DIRECTIVES
 
 
 def _include_words(line: str) -> list[str]:
     """Literal words named by an `include`/`-include`/`sinclude` line; `$`/glob words are skipped."""
-    words = line.split()
-    if not words or words[0] not in _INCLUDE_DIRECTIVES:
+    if not _is_include_line(line):
         return []
-    return [w for w in words[1:] if not any(c in w for c in "$*?[")]
+    return [w for w in line.split()[1:] if not any(c in w for c in "$*?[")]
 
 
 def _rule_end(line: str) -> int | None:
@@ -143,6 +151,14 @@ def _outside(word: str | None) -> Violation:
     return Violation(MAKE_PATH, f"include {_shown(word)} is outside the service directory")
 
 
+def _backslash_include(name: str) -> Violation:
+    return Violation(
+        MAKE_PATH,
+        f"include line in {_shown(name)} uses a backslash (continuation or escape); write each include word literally"
+        " on one line",
+    )
+
+
 def _lexically_outside(word: str, root: Path) -> bool:
     """Absolute words and `..` escapes are rejected before touching the filesystem."""
     return Path(word).is_absolute() or not Path(os.path.normpath(root / word)).is_relative_to(root)
@@ -186,6 +202,8 @@ class _Scanner:
     problems: list[Violation] = field(default_factory=list)
     pending: deque[tuple[Path, str | None]] = field(default_factory=deque)
     words: set[str] = field(default_factory=set)
+    spellings: list[str] = field(default_factory=list)
+    seen_spellings: set[str] = field(default_factory=set)
     visited: set[Path] = field(default_factory=set)
     stopped: bool = False
 
@@ -201,7 +219,14 @@ class _Scanner:
             self.problems.append(violation)
 
     def queue(self, word: str) -> None:
-        """Queue an include word once per normalised spelling; stop past MAX_INCLUDE_WORDS distinct words."""
+        """Record each distinct spelling and queue the word once per normalised spelling; stop past
+        MAX_INCLUDE_WORDS distinct spellings or normalised words."""
+        if not self.stopped and word not in self.seen_spellings:
+            if len(self.seen_spellings) >= MAX_INCLUDE_WORDS:
+                self.stop(f"too many include words (limit {MAX_INCLUDE_WORDS})")
+                return
+            self.seen_spellings.add(word)
+            self.spellings.append(word)
         key = os.path.normpath(word)
         if self.stopped or key in self.words:
             return
@@ -228,6 +253,9 @@ class _Scanner:
             return
         for line in lines:
             self.targets |= _rule_names(line)
+            if _is_include_line(line) and "\\" in line:  # make would read other words than the scan sees
+                self.problem(_backslash_include(word or MAKE_PATH))
+                continue
             for included in _include_words(line):
                 self.queue(included)
 
@@ -242,21 +270,39 @@ def makefile_targets(makefile: Path) -> MakefileScan:
     scanner.pending.append((makefile, None))
     while scanner.pending and not scanner.stopped:
         scanner.visit(*scanner.pending.popleft())
-    return MakefileScan(frozenset(scanner.targets), tuple(scanner.problems))
+    return MakefileScan(frozenset(scanner.targets), tuple(scanner.problems), tuple(scanner.spellings))
+
+
+def _extra_makefiles(directory: Path) -> list[Violation]:
+    """One violation per entry (stored name, sorted) that GNU make would read instead of `Makefile`.
+
+    Names are compared as listed, so `Makefile` itself never matches; fails closed if the directory cannot be listed."""
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return [Violation(MAKE_PATH, "cannot list the service directory")]
+    return [
+        Violation(name, "GNU make reads this file before Makefile, but only Makefile is validated; remove or rename it")
+        for name in sorted(names)
+        if name != MAKE_PATH and name.casefold() in _SHADOWING_MAKEFILES
+    ]
 
 
 def check_make_contract(doc: Any, makefile: Path) -> list[Violation]:
     """Make contract (I2) violations for the Makefile beside `idp.yaml`.
 
-    If the Makefile or an include cannot be read safely, only those problems are reported (the target list
-    would be incomplete)."""
+    Entries that would shadow the Makefile (`GNUmakefile`/`makefile`, any case) are reported first. If the Makefile
+    or an include cannot be read safely, only those problems follow (the target list would be incomplete)."""
     if not makefile.is_file():
         return [Violation(MAKE_PATH, "Makefile not found")]
+    extra = _extra_makefiles(makefile.parent)
     scan = makefile_targets(makefile)
     if scan.violations:
-        return list(scan.violations)
+        return extra + list(scan.violations)
     targets = scan.targets
-    violations = [Violation(MAKE_PATH, f"missing required target '{t}'") for t in REQUIRED_TARGETS if t not in targets]
+    violations = extra + [
+        Violation(MAKE_PATH, f"missing required target '{t}'") for t in REQUIRED_TARGETS if t not in targets
+    ]
     return violations + [
         Violation(MAKE_PATH, f"missing target 'test-{k}' (required because spec.tests.{k} is true)")
         for k in _enabled_test_kinds(doc)
@@ -273,15 +319,29 @@ def _enabled_test_kinds(doc: Any) -> list[str]:
     return [k for k in TEST_KINDS if tests.get(k) is True]
 
 
-def validate_service(path: Path) -> list[Violation]:
-    """Schema violations for `path`, then Make contract violations (skipped if the YAML is not a mapping)."""
-    doc, errors = _load_yaml(path)
+def load_service(path: Path) -> tuple[Any, list[Violation]]:
+    """Parsed `idp.yaml` and its violations: schema, then Make contract (skipped if the YAML is not a mapping).
+
+    On invalid YAML, or a file that cannot be read or decoded, the document is None and the only violation says so."""
+    try:
+        doc, errors = _load_yaml(path)
+    except UnicodeDecodeError as exc:  # a ValueError, not an OSError
+        return None, [Violation("", f"cannot read: not valid UTF-8 ({exc.reason} at byte {exc.start})")]
+    except OSError as exc:
+        return None, [Violation("", f"cannot read: {exc.strerror or exc}")]
+    except RecursionError:  # the YAML parser recurses per nesting level
+        return None, [Violation("", "cannot parse: nesting too deep")]
     if errors:
-        return errors
+        return None, errors
     violations = validate_document(doc)
     if isinstance(doc, dict):
         violations += check_make_contract(doc, path.parent / MAKE_PATH)
-    return violations
+    return doc, violations
+
+
+def validate_service(path: Path) -> list[Violation]:
+    """Schema violations for `path`, then Make contract violations (skipped if the YAML is not a mapping)."""
+    return load_service(path)[1]
 
 
 def to_dict(file: str, violations: list[Violation]) -> dict[str, object]:

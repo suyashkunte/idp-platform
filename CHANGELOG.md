@@ -45,3 +45,15 @@ versions follow [Semantic Versioning](https://semver.org/).
   (the editable build's extra requirement) via `[tool.uv] build-constraint-dependencies` (versions pinned, not
   hashes); a drift test keeps uv.lock (closures and its build-constraints record), build-constraints.txt and the root
   list in step.
+- IDP-22: `idp validate` reports a `GNUmakefile`/`makefile` (any case) beside `Makefile` as a violation (GNU make
+  would read it instead of the validated Makefile) and fails closed with `Makefile: cannot list the service directory`;
+  `idp conformance` runs `make -f Makefile verify`, fails symlinked or out-of-DIR example entries
+  (`outside examples directory`) without running make, and parses `idp.yaml` once. `idp conformance` also pins
+  `Makefile` and every literal include word with `--assume-old=<word>` (plus the `./`-stripped spelling), so make
+  cannot remake them and restart with unvalidated content; it re-scans the Makefile before make and fails
+  `include words exceed the make argument limit` above 64 KiB of such arguments. Dynamic `$(...)` includes (e.g.
+  `$(IDP_PROFILE_DIR)/defaults.mk`) remain unpinned. `idp validate` reports an `idp.yaml` that cannot be read, is not
+  UTF-8 or is nested too deeply as a `<root>` violation (`cannot read: ...`, `cannot parse: nesting too deep`) instead
+  of a traceback, and conformance continues with the other examples; rejects any `include`/`-include`/`sinclude` line
+  containing a backslash (continuation or escape); and caps include spellings at 1024, so 1025 spellings of 1024 or
+  fewer files now fail with `too many include words (limit 1024)`.

@@ -1,0 +1,17 @@
+# IDP-22 negative conformance fixture: a valid minimal-service contract. The ONE defect is the GNUmakefile beside
+# the Makefile: GNU make would read it instead of the validated Makefile, so `idp validate` must report it.
+apiVersion: idp.dev/v1
+kind: Service
+metadata:
+  name: gnumakefile-bypass
+  owner: platform
+  tier: 3
+  tracker: { kind: jira, site: suyashkunte.atlassian.net, project: IDP, labels: [repo:idp-platform] }
+spec:
+  type: web-api
+  target: kubernetes
+  build:
+    profile: python-uv
+  runtime:
+    port: 8000
+    health: { live: /healthz/live, ready: /healthz/ready, startup: /healthz/startup }
