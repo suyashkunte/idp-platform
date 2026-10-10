@@ -813,3 +813,84 @@ def test_extra_makefile_violation_in_json_output(
         ],
     }
     assert code == 1
+
+
+# --- IDP-22 AC-5: the scan records every literal include word as written (conformance pins them) -----------------
+
+
+@pytest.mark.ac("IDP-22:AC-5")
+def test_makefile_scan_records_literal_include_words_as_written(tmp_path: Path) -> None:
+    makefile = tmp_path / "Makefile"
+    makefile.write_text(
+        "include common.mk ./common.mk\n"
+        "-include gen.mk\n"  # missing on disk: recorded anyway (a rule could generate it)
+        "sinclude sub/x.mk\n"
+        "include $(V)/d.mk\n"  # dynamic: not scanned, not recorded
+        "include *.mk\n"  # glob: not scanned, not recorded
+        "lint:\n\t@true\n"
+    )
+    (tmp_path / "common.mk").write_text("include gen.mk\nverify:\n\t@true\n")  # gen.mk again: recorded once
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "x.mk").write_text("test:\n\t@true\n")
+
+    scan = contract.makefile_targets(makefile)
+
+    assert getattr(scan, "include_words", None) == ("common.mk", "./common.mk", "gen.mk", "sub/x.mk")
+    assert scan.targets == {"lint", "verify", "test"}
+    assert scan.violations == ()
+
+
+@pytest.mark.ac("IDP-22:AC-5")
+@pytest.mark.parametrize(
+    ("count", "violations"),
+    [(1024, ()), (1025, (contract.Violation("Makefile", "too many include words (limit 1024)"),))],
+    ids=["at-limit", "over-limit"],
+)
+def test_makefile_scan_caps_recorded_include_spellings(
+    tmp_path: Path, count: int, violations: tuple[contract.Violation, ...]
+) -> None:
+    (tmp_path / "a.mk").write_text("verify:\n\t@true\n")
+    # Distinct spellings of the same file: one normalised path, so only the spelling cap can trigger.
+    words = ["a.mk", *(f"d{i}/../a.mk" for i in range(count - 1))]
+    makefile = tmp_path / "Makefile"
+    makefile.write_text(f"include {' '.join(words)}\nlint:\n\t@true\n")
+
+    scan = contract.makefile_targets(makefile)
+
+    assert scan.violations == violations
+    assert len(getattr(scan, "include_words", ())) == 1024
+
+
+# --- IDP-22 AC-6: an idp.yaml that cannot be read or decoded is a violation, not a traceback ----------------------
+
+
+@pytest.mark.ac("IDP-22:AC-6")
+@pytest.mark.parametrize(
+    ("kind", "message"),
+    [
+        ("not-utf8", "cannot read: not valid UTF-8 (invalid continuation byte at byte 9)"),
+        ("permission", "cannot read: Permission denied"),
+    ],
+    ids=["undecodable", "unreadable"],
+)
+def test_unreadable_or_undecodable_idp_yaml_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], kind: str, message: str
+) -> None:
+    _write_makefile(tmp_path)
+    if kind == "not-utf8":
+        (tmp_path / "idp.yaml").write_bytes(b"name: caf\xe9\n")
+    else:
+        _write_idp(tmp_path)
+
+        def denied(path: Path) -> tuple[Any, list[contract.Violation]]:
+            raise PermissionError(13, "Permission denied", str(path))
+
+        monkeypatch.setattr(contract, "_load_yaml", denied)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate"])
+
+    assert capsys.readouterr().out == f"idp.yaml: <root>: {message}\n"
+    assert code == 1
+    assert _run(["validate", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["violations"] == [{"path": "", "message": message}]
