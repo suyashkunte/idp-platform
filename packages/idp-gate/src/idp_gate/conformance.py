@@ -1,7 +1,9 @@
 """Conformance runner (IDP-19): `idp validate` and `make verify` for every example directory with an `idp.yaml`.
 
 IDP-22: an example that is a symlink or resolves outside the examples directory fails before anything runs, and
-`make verify` reads only the validated Makefile (`-f Makefile`)."""
+`make verify` reads only the validated Makefile (`-f Makefile`). The Makefile and every literal include word the scan
+saw are pinned with `--assume-old=<word>`, so make neither remakes them nor restarts with unvalidated content.
+Residual risk: dynamic includes (`$(...)` words, e.g. `$(IDP_PROFILE_DIR)/defaults.mk`) are not pinned."""
 
 from __future__ import annotations
 
@@ -15,6 +17,7 @@ from pathlib import Path
 from idp_gate import contract, profiles
 
 MAKE_TIMEOUT_S = 60
+MAX_ASSUME_OLD_BYTES = 64 * 1024  # summed UTF-8 length of the `--assume-old=` arguments
 OUTPUT_TAIL_LINES = 40
 EXAMPLE_FILE = "idp.yaml"
 # Inherited make state must not change the example's run (outer `make -n/-k/-j`, MAKEFILES).
@@ -50,7 +53,27 @@ def _tail(output: str) -> tuple[str, ...]:
     return tuple(output.splitlines()[-OUTPUT_TAIL_LINES:])
 
 
-def _run_make_verify(directory: Path, make: str, profile_dir: str) -> Result:
+def _assume_old(words: tuple[str, ...]) -> list[str] | None:
+    """`--assume-old=` arguments for `Makefile` and each include word (plus its `./`-stripped spelling), in order
+    and without duplicates; None if they exceed MAX_ASSUME_OLD_BYTES."""
+    names = [contract.MAKE_PATH]
+    for word in words:
+        names.append(word)
+        stripped = word
+        while stripped.startswith("./"):
+            stripped = stripped[2:]
+        if word.startswith("./") and stripped:
+            names.append(stripped)
+    args = [f"--assume-old={n}" for n in dict.fromkeys(names)]
+    return None if sum(len(a.encode("utf-8")) for a in args) > MAX_ASSUME_OLD_BYTES else args
+
+
+def _invalid(directory: Path, violations: list[contract.Violation] | tuple[contract.Violation, ...]) -> Result:
+    reason = f"idp validate: {len(violations)} violation(s)"
+    return Result(directory, ok=False, reason=reason, details=tuple(str(v) for v in violations))
+
+
+def _run_make_verify(directory: Path, make: str, profile_dir: str, assume_old: list[str]) -> Result:
     # `-f Makefile`: make reads only the validated Makefile, never a GNUmakefile/makefile beside it.
     argv = [
         make,
@@ -59,6 +82,7 @@ def _run_make_verify(directory: Path, make: str, profile_dir: str) -> Result:
         str(directory),
         "-f",
         contract.MAKE_PATH,
+        *assume_old,
         "verify",
         f"IDP_PROFILE_DIR={profile_dir}",
     ]
@@ -108,10 +132,15 @@ def check_example(directory: Path, make: str, root: Path) -> Result:
     path = directory / EXAMPLE_FILE
     doc, violations = contract.load_service(path)
     if violations:
-        reason = f"idp validate: {len(violations)} violation(s)"
-        return Result(directory, ok=False, reason=reason, details=tuple(str(v) for v in violations))
+        return _invalid(directory, violations)
     try:
         profile_dir = str(profiles.resolve(doc["spec"]["build"]["profile"])["dir"])
     except profiles.ProfileError as exc:
         return Result(directory, ok=False, reason="profile: " + "; ".join(exc.lines))
-    return _run_make_verify(directory, make, profile_dir)
+    scan = contract.makefile_targets(directory / contract.MAKE_PATH)  # include words to pin; files may have changed
+    if scan.violations:
+        return _invalid(directory, scan.violations)
+    assume_old = _assume_old(scan.include_words)
+    if assume_old is None:
+        return Result(directory, ok=False, reason="include words exceed the make argument limit")
+    return _run_make_verify(directory, make, profile_dir, assume_old)
