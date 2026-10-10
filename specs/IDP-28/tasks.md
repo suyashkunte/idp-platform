@@ -19,7 +19,7 @@ package tests green. Test names and exact expectations are in plan.md ("Tests").
     cases), `test_root_make_verify_runs_conformance` and `test_default_targets_have_recipes_in_defaults_mk` stay green
     unchanged.
   - (AC-1, AC-3) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py.
-- [ ] T2 Real-make continuation attack.
+- [x] T2 Real-make continuation attack.
   - Add `needs_make` `test_continuation_cannot_hide_generated_include_from_pinning` (explicit `os.utime`, no sleeps).
   - Check red-first by stashing T1's `contract.py` change (make generates `gen.mk` and `evil-ran` appears), then
     green with T1.
