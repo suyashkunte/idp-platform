@@ -25,7 +25,12 @@ _SHADOWING_MAKEFILES = frozenset({"gnumakefile", "makefile"})
 # After the rule colon: `[export|override|private ...] VAR <op>` makes it a target-specific variable line.
 _TARGET_VARIABLE = re.compile(r"\s*(?:(?:export|override|private)\s+)*[^\s:=#;]+\s*(?::{1,3}|[+?!])?=")
 # `define NAME` starts a block; `define := x` (a variable named `define`) does not.
-_DEFINE_START = re.compile(r"^\s*(?:(?:override|export|private)\s+)*define(?:\s|$)(?!\s*(?::{1,3}|[+?!])?=)")
+# A top-level define line: blanks, modifiers, `define`, then a blank or the end, and no assignment operator after it
+# (`define := 1` and `export define ?= 3` assign a variable named `define`). Linear: each modifier word and its blanks
+# have one way to match, so a failed match backtracks at most once per word.
+_DEFINE_LINE = re.compile(
+    r"[ \t]*((?:(?:override|export|unexport|private)[ \t]+)*)define(?:[ \t]|$)(?![ \t]*(?::{1,3}|[+?!])?=)"
+)
 _COMMENT = re.compile(r"(?<!\\)#")  # `\#` is a literal hash, not a comment
 # Characters Python may split lines on but make does not (make splits on LF only and drops CR before LF).
 # One character class plus a one-character lookahead: never backtracks.
@@ -183,7 +188,8 @@ def _body_line(collapsed: str) -> Literal["end", "ambiguous", "text"]:
 
 def _parsed_lines(text: str) -> tuple[list[_Line], list[str]]:
     """Collapsed logical lines with comments (unescaped `#`) removed and `define ... endef` bodies skipped (body lines
-    classified by `_body_line`; no nesting count), plus the define problems ("ambiguous") in line order."""
+    classified by `_body_line`; no nesting count), plus the define problems ("ambiguous", "modifier") in line order.
+    Only `define` and a single `override define` open a block; other modifier lists are "modifier" and open none."""
     lines: list[_Line] = []
     problems: list[str] = []
     in_define = False
@@ -196,10 +202,13 @@ def _parsed_lines(text: str) -> tuple[list[_Line], list[str]]:
                 problems.append(kind)
             continue
         code = _COMMENT.split(collapsed, maxsplit=1)[0]
-        if not code.startswith("\t") and _DEFINE_START.match(code):
+        define = None if code.startswith("\t") else _DEFINE_LINE.match(code)
+        if define is not None and define.group(1).split() in ([], ["override"]):
             in_define = True
-        else:
-            lines.append(_Line(code, _COMMENT.split(raw, maxsplit=1)[0]))
+            continue
+        if define is not None:
+            problems.append("modifier")
+        lines.append(_Line(code, _COMMENT.split(raw, maxsplit=1)[0]))
     return lines, problems
 
 
@@ -239,6 +248,14 @@ def _ambiguous_define_line(name: str) -> Violation:
         MAKE_PATH,
         f"define body in {_shown(name)} has a line make reads differently in skipped conditional branches"
         " (nested define, endef followed by '#', or tab-indented endef); remove it",
+    )
+
+
+def _modifier_define(name: str) -> Violation:
+    return Violation(
+        MAKE_PATH,
+        f"{_shown(name)} has a define with export, unexport or private, which GNU make 3.81 and 4.x read differently;"
+        " use define or override define",
     )
 
 
@@ -284,7 +301,7 @@ def _load_makefile(resolved: Path, name: str) -> tuple[list[_Line], list[Violati
     if match := _FOREIGN_SEPARATOR.search(text):
         return _foreign_separator(name, match)
     lines, problems = _parsed_lines(text)
-    return lines, [_ambiguous_define_line(name) for _ in problems]
+    return lines, [_ambiguous_define_line(name) if p == "ambiguous" else _modifier_define(name) for p in problems]
 
 
 @dataclass

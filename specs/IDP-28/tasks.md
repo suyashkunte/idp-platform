@@ -119,7 +119,7 @@ T14.
     change"); its nested case moves to the AC-10 test.
   - (AC-9, AC-10) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
     packages/idp-gate/tests/test_conformance.py.
-- [ ] T11 Define lines with export, unexport or private fail closed.
+- [x] T11 Define lines with export, unexport or private fail closed.
   - Add `test_define_with_export_unexport_or_private_is_a_violation` and the `override` linear-time case (red), and
     `needs_make` `test_modifier_define_cannot_hide_generated_include` (`private define X = 1`,
     `export define X = 1`; red: PASS, with `evil-ran` on 3.81).
