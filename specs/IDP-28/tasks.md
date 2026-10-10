@@ -40,7 +40,7 @@ package tests green. Test names and exact expectations are in plan.md ("Tests").
     `test_conformance_module_uses_no_private_contract_members`, all IDP-17 validate tests and mypy strict stay green.
   - (AC-5) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/src/idp_gate/conformance.py,
     packages/idp-gate/tests/test_conformance.py.
-- [ ] T5 Dynamic include words in the scanner.
+- [x] T5 Dynamic include words in the scanner.
   - Add `test_makefile_scan_records_dynamic_include_words` (order, dedup, `$$`, glob excluded, shared spelling cap)
     (red).
   - Then implement `MakefileScan.dynamic_include_words`, `_dynamic_include_words` and `_Scanner.record_dynamic`.

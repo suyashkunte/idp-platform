@@ -79,6 +79,7 @@ class MakefileScan:
     targets: frozenset[str]
     violations: tuple[Violation, ...]
     include_words: tuple[str, ...] = ()  # distinct literal include words as written, in first-seen order
+    dynamic_include_words: tuple[str, ...] = ()  # distinct `$` include words as written (never followed)
 
 
 _EMPTY_SCAN = MakefileScan(frozenset(), ())  # returned when the Makefile was not scanned
@@ -95,6 +96,13 @@ def _include_words(line: str) -> list[str]:
     if not _is_include_line(line):
         return []
     return [w for w in line.split()[1:] if not any(c in w for c in "$*?[")]
+
+
+def _dynamic_include_words(line: str) -> list[str]:
+    """Words of an `include`/`-include`/`sinclude` line that contain `$` (make expands them; never followed)."""
+    if not _is_include_line(line):
+        return []
+    return [w for w in line.split()[1:] if "$" in w]
 
 
 def _rule_end(line: str) -> int | None:
@@ -238,6 +246,7 @@ class _Scanner:
     words: set[str] = field(default_factory=set)
     spellings: list[str] = field(default_factory=list)
     seen_spellings: set[str] = field(default_factory=set)
+    dynamic: list[str] = field(default_factory=list)
     visited: set[Path] = field(default_factory=set)
     stopped: bool = False
 
@@ -270,6 +279,16 @@ class _Scanner:
         self.words.add(key)
         self.pending.append((self.base / word, word))
 
+    def record_dynamic(self, word: str) -> None:
+        """Record a distinct `$` word as written; it shares the spelling cap with literal words and is never queued."""
+        if self.stopped or word in self.seen_spellings:
+            return
+        if len(self.seen_spellings) >= MAX_INCLUDE_WORDS:
+            self.stop(f"too many include words (limit {MAX_INCLUDE_WORDS})")
+            return
+        self.seen_spellings.add(word)
+        self.dynamic.append(word)
+
     def visit(self, path: Path, word: str | None) -> None:
         located = _locate(path, word, self.root)
         if located is None or located in self.visited:
@@ -290,6 +309,8 @@ class _Scanner:
             if _is_include_line(line) and "\\" in line:  # make would read other words than the scan sees
                 self.problem(_backslash_include(word or MAKE_PATH))
                 continue
+            for dynamic in _dynamic_include_words(line):
+                self.record_dynamic(dynamic)
             for included in _include_words(line):
                 self.queue(included)
 
@@ -304,7 +325,9 @@ def makefile_targets(makefile: Path) -> MakefileScan:
     scanner.pending.append((makefile, None))
     while scanner.pending and not scanner.stopped:
         scanner.visit(*scanner.pending.popleft())
-    return MakefileScan(frozenset(scanner.targets), tuple(scanner.problems), tuple(scanner.spellings))
+    return MakefileScan(
+        frozenset(scanner.targets), tuple(scanner.problems), tuple(scanner.spellings), tuple(scanner.dynamic)
+    )
 
 
 def _extra_makefiles(directory: Path) -> list[Violation]:
