@@ -20,6 +20,8 @@ MAKE_PATH = "Makefile"
 REQUIRED_TARGETS = ("lint", "test", "test-component", "verify", "spec-trace")
 TEST_KINDS = ("smoke", "api", "e2e", "perf")
 _INCLUDE_DIRECTIVES = frozenset({"include", "-include", "sinclude"})
+# Casefolded names GNU make reads before `Makefile`; such an entry beside the validated Makefile would shadow it.
+_SHADOWING_MAKEFILES = frozenset({"gnumakefile", "makefile"})
 # After the rule colon: `[export|override|private ...] VAR <op>` makes it a target-specific variable line.
 _TARGET_VARIABLE = re.compile(r"\s*(?:(?:export|override|private)\s+)*[^\s:=#;]+\s*(?::{1,3}|[+?!])?=")
 # `define NAME` starts a block; `define := x` (a variable named `define`) does not.
@@ -245,18 +247,36 @@ def makefile_targets(makefile: Path) -> MakefileScan:
     return MakefileScan(frozenset(scanner.targets), tuple(scanner.problems))
 
 
+def _extra_makefiles(directory: Path) -> list[Violation]:
+    """One violation per entry (stored name, sorted) that GNU make would read instead of `Makefile`.
+
+    Names are compared as listed, so `Makefile` itself never matches; fails closed if the directory cannot be listed."""
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return [Violation(MAKE_PATH, "cannot list the service directory")]
+    return [
+        Violation(name, "GNU make reads this file before Makefile, but only Makefile is validated; remove or rename it")
+        for name in sorted(names)
+        if name != MAKE_PATH and name.casefold() in _SHADOWING_MAKEFILES
+    ]
+
+
 def check_make_contract(doc: Any, makefile: Path) -> list[Violation]:
     """Make contract (I2) violations for the Makefile beside `idp.yaml`.
 
-    If the Makefile or an include cannot be read safely, only those problems are reported (the target list
-    would be incomplete)."""
+    Entries that would shadow the Makefile (`GNUmakefile`/`makefile`, any case) are reported first. If the Makefile
+    or an include cannot be read safely, only those problems follow (the target list would be incomplete)."""
     if not makefile.is_file():
         return [Violation(MAKE_PATH, "Makefile not found")]
+    extra = _extra_makefiles(makefile.parent)
     scan = makefile_targets(makefile)
     if scan.violations:
-        return list(scan.violations)
+        return extra + list(scan.violations)
     targets = scan.targets
-    violations = [Violation(MAKE_PATH, f"missing required target '{t}'") for t in REQUIRED_TARGETS if t not in targets]
+    violations = extra + [
+        Violation(MAKE_PATH, f"missing required target '{t}'") for t in REQUIRED_TARGETS if t not in targets
+    ]
     return violations + [
         Violation(MAKE_PATH, f"missing target 'test-{k}' (required because spec.tests.{k} is true)")
         for k in _enabled_test_kinds(doc)
