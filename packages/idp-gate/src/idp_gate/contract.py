@@ -78,12 +78,17 @@ class MakefileScan:
     include_words: tuple[str, ...] = ()  # distinct literal include words as written, in first-seen order
 
 
+def _is_include_line(line: str) -> bool:
+    """True if the first word of `line` is `include`, `-include` or `sinclude`."""
+    words = line.split(maxsplit=1)
+    return bool(words) and words[0] in _INCLUDE_DIRECTIVES
+
+
 def _include_words(line: str) -> list[str]:
     """Literal words named by an `include`/`-include`/`sinclude` line; `$`/glob words are skipped."""
-    words = line.split()
-    if not words or words[0] not in _INCLUDE_DIRECTIVES:
+    if not _is_include_line(line):
         return []
-    return [w for w in words[1:] if not any(c in w for c in "$*?[")]
+    return [w for w in line.split()[1:] if not any(c in w for c in "$*?[")]
 
 
 def _rule_end(line: str) -> int | None:
@@ -144,6 +149,14 @@ def _outside(word: str | None) -> Violation:
     if word is None:
         return Violation(MAKE_PATH, "Makefile resolves outside the service directory")
     return Violation(MAKE_PATH, f"include {_shown(word)} is outside the service directory")
+
+
+def _backslash_include(name: str) -> Violation:
+    return Violation(
+        MAKE_PATH,
+        f"include line in {_shown(name)} uses a backslash (continuation or escape); write each include word literally"
+        " on one line",
+    )
 
 
 def _lexically_outside(word: str, root: Path) -> bool:
@@ -240,6 +253,9 @@ class _Scanner:
             return
         for line in lines:
             self.targets |= _rule_names(line)
+            if _is_include_line(line) and "\\" in line:  # make would read other words than the scan sees
+                self.problem(_backslash_include(word or MAKE_PATH))
+                continue
             for included in _include_words(line):
                 self.queue(included)
 
