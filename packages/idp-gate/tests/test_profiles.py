@@ -1184,15 +1184,16 @@ def _parse_constraints(text: str) -> tuple[_Pins, list[str]]:
         if not line or line.startswith("#"):
             continue
         requirement, *options = line.split()
-        name, sep, version = requirement.partition("==")
-        if sep != "==":
+        match = _EXACT_PIN.match(requirement.split(";", 1)[0])
+        if match is None:
             problems.append(f"{requirement!r} {_NOT_EXACT}")
             continue
-        if _normalize(name) in pins:
-            problems.append(f"duplicate entry for {_normalize(name)}")
+        name = _normalize(match.group(1))
+        if name in pins:
+            problems.append(f"duplicate entry for {name}")
             continue
         hashes = frozenset(o.removeprefix("--hash=") for o in options if o.startswith("--hash="))
-        pins[_normalize(name)] = (version.split(";", 1)[0], hashes)
+        pins[name] = (match.group(2), hashes)
     return pins, problems
 
 
@@ -1394,18 +1395,24 @@ def _root_drift(versions: dict[str, str], root_entries: object | None) -> tuple[
     return (None if problems else pins), [f"{_ROOT_STALE}: {'; '.join(differences)}; {remedy}"]
 
 
+def _recorded_pin(entry: object) -> str | None:
+    """`name<specifier>` for a `{name, specifier}` record entry with string values and no other keys, else None."""
+    if not isinstance(entry, dict) or set(entry) != {"name", "specifier"}:
+        return None
+    name, specifier = entry["name"], entry["specifier"]
+    return f"{name}{specifier}" if isinstance(name, str) and isinstance(specifier, str) else None
+
+
 def _lock_record_drift(root_pins: dict[str, str], lock_recorded: object) -> list[str]:
-    """Compare uv.lock `[manifest] build-constraints` (`[{name, specifier}]`) with the root list."""
+    """Compare uv.lock `[manifest] build-constraints` (`[{name, specifier}]`) with the root list. A record entry with
+    any other key (e.g. `marker`) is not an exact pin."""
     entries = lock_recorded
+    bad: list[str] = []
     if isinstance(lock_recorded, list):
-        entries = [
-            f"{e['name']}{e['specifier']}"
-            if isinstance(e, dict) and isinstance(e.get("name"), str) and isinstance(e.get("specifier"), str)
-            else e
-            for e in lock_recorded
-        ]
+        entries = [_recorded_pin(e) for e in lock_recorded if _recorded_pin(e) is not None]
+        bad = [f"{e!r} {_NOT_EXACT}" for e in lock_recorded if _recorded_pin(e) is None]
     pins, problems = _parse_exact_pins(entries, "uv.lock [manifest] build-constraints")
-    differences = problems + _compare(root_pins, pins, reference_name="pyproject.toml")
+    differences = bad + problems + _compare(root_pins, pins, reference_name="pyproject.toml")
     return [f"{_LOCK_STALE} ({'; '.join(differences)})"] if differences else []
 
 
@@ -1418,10 +1425,13 @@ def _build_constraint_drift(
     problems = _file_drift(locked, constraints_text)
     root_pins, root_problems = _root_drift(versions, root_entries)
     problems += root_problems
-    if lock_recorded is not None and root_pins is not None:
+    if lock_recorded is not None and root_pins is not None and not root_problems:  # a stale root list is blamed alone
         problems += _lock_record_drift(root_pins, lock_recorded)
     if problems:
-        problems.append(f"To bump hatchling on purpose: {_BUMP_HINT}, then update both derived sources as above.")
+        problems.append(
+            f"To bump hatchling on purpose: run `{_BUMP_HINT}` first, then regenerate build-constraints.txt, "
+            "then a human updates the root list and runs `uv lock`."
+        )
     return problems
 
 
@@ -1444,7 +1454,7 @@ _DRIFT_CASES = {
         _LOCKED,
         _FILE,
         ["hatchling==1.33.0", "packaging==26.3"],
-        None,
+        _RECORDED,
         (
             _ROOT_STALE,
             "hatchling: 1.33.0, uv.lock has 1.32.4",
@@ -1468,7 +1478,7 @@ _DRIFT_CASES = {
         _LOCKED_BUMPED,
         _FILE,
         _ROOT,
-        None,
+        _RECORDED,
         (
             _FILE_STALE,
             _REGENERATE_CONSTRAINTS,
@@ -1485,86 +1495,105 @@ _DRIFT_CASES = {
         _LOCKED,
         _FILE,
         ["hatchling==1.32.4"],
-        None,
+        _RECORDED,
         (_ROOT_STALE, "missing packaging==26.3", _BUMP_HINT),
-        (_FILE_STALE,),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-extra-package": _DriftCase(
         _LOCKED,
         _FILE,
         [*_ROOT, "setuptools==80.0"],
-        None,
+        _RECORDED,
         (_ROOT_STALE, "extra setuptools==80.0", _BUMP_HINT),
-        (_FILE_STALE,),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "file-missing-package": _DriftCase(
         _LOCKED,
         f"hatchling==1.32.4 \\\n    --hash={_HATCHLING_HASH}\n",
         _ROOT,
-        None,
+        _RECORDED,
         (_FILE_STALE, "missing packaging==26.3", _REGENERATE_CONSTRAINTS, _BUMP_HINT),
-        (_ROOT_STALE,),
+        (_ROOT_STALE, _LOCK_STALE),
     ),
     "file-extra-package": _DriftCase(
         _LOCKED,
         _FILE + f"setuptools==80.0 \\\n    --hash=sha256:{'d' * 64}\n",
         _ROOT,
-        None,
+        _RECORDED,
         (_FILE_STALE, "extra setuptools==80.0", _REGENERATE_CONSTRAINTS, _BUMP_HINT),
-        (_ROOT_STALE,),
+        (_ROOT_STALE, _LOCK_STALE),
     ),
     "root-range": _DriftCase(
         _LOCKED,
         _FILE,
         ["hatchling>=1.25", "packaging==26.3"],
-        None,
+        _RECORDED,
         (_ROOT_STALE, "hatchling>=1.25", _NOT_EXACT, _ROOT_REMEDY, _BUMP_HINT),
-        (_FILE_STALE,),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-compatible-release": _DriftCase(
-        _LOCKED, _FILE, ["hatchling~=1.32", "packaging==26.3"], None, (_ROOT_STALE, "hatchling~=1.32", _NOT_EXACT)
+        _LOCKED,
+        _FILE,
+        ["hatchling~=1.32", "packaging==26.3"],
+        _RECORDED,
+        (_ROOT_STALE, "hatchling~=1.32", _NOT_EXACT),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-wildcard": _DriftCase(
-        _LOCKED, _FILE, ["hatchling==1.32.*", "packaging==26.3"], None, (_ROOT_STALE, "hatchling==1.32.*", _NOT_EXACT)
+        _LOCKED,
+        _FILE,
+        ["hatchling==1.32.*", "packaging==26.3"],
+        _RECORDED,
+        (_ROOT_STALE, "hatchling==1.32.*", _NOT_EXACT),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-arbitrary-equality": _DriftCase(
-        _LOCKED, _FILE, ["hatchling===1.32.4", "packaging==26.3"], None, (_ROOT_STALE, "hatchling===1.32.4", _NOT_EXACT)
+        _LOCKED,
+        _FILE,
+        ["hatchling===1.32.4", "packaging==26.3"],
+        _RECORDED,
+        (_ROOT_STALE, "hatchling===1.32.4", _NOT_EXACT),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-marker": _DriftCase(
         _LOCKED,
         _FILE,
         ["hatchling==1.32.4; python_version >= '3.12'", "packaging==26.3"],
-        None,
+        _RECORDED,
         (_ROOT_STALE, "hatchling==1.32.4; python_version >= '3.12'", _NOT_EXACT),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-extra": _DriftCase(
         _LOCKED,
         _FILE,
         ["hatchling[cli]==1.32.4", "packaging==26.3"],
-        None,
+        _RECORDED,
         (_ROOT_STALE, "hatchling[cli]==1.32.4", _NOT_EXACT),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-second-specifier": _DriftCase(
         _LOCKED,
         _FILE,
         ["hatchling==1.32.4,<2", "packaging==26.3"],
-        None,
+        _RECORDED,
         (_ROOT_STALE, "hatchling==1.32.4,<2", _NOT_EXACT),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-problems-all-reported": _DriftCase(
         _LOCKED,
         _FILE,
         ["hatchling>=1.25"],
-        None,
+        _RECORDED,
         (_ROOT_STALE, "hatchling>=1.25", _NOT_EXACT, "missing packaging==26.3", _BUMP_HINT),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "file-range": _DriftCase(
         _LOCKED,
         _FILE.replace("hatchling==1.32.4", "hatchling>=1.25"),
         _ROOT,
-        None,
+        _RECORDED,
         (_FILE_STALE, "hatchling>=1.25", _NOT_EXACT, _REGENERATE_CONSTRAINTS, _BUMP_HINT),
-        (_ROOT_STALE,),
+        (_ROOT_STALE, _LOCK_STALE),
     ),
     "file-marker-ignored": _DriftCase(
         _LOCKED,
@@ -1577,41 +1606,41 @@ _DRIFT_CASES = {
         _LOCKED,
         _FILE,
         [*_ROOT, "Hatchling==1.32.4"],
-        None,
+        _RECORDED,
         (_ROOT_STALE, "duplicate", "hatchling", _ROOT_REMEDY, _BUMP_HINT),
-        (_FILE_STALE,),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-key-absent": _DriftCase(
         _LOCKED,
         _FILE,
         None,
-        None,
+        _RECORDED,
         (_ROOT_ABSENT, _ROOT_REMEDY, "hatchling==1.32.4", "packaging==26.3", "then run: uv lock", _BUMP_HINT),
-        (_FILE_STALE,),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-not-a-list": _DriftCase(
         _LOCKED,
         _FILE,
         "hatchling==1.32.4",
-        None,
+        _RECORDED,
         ("root pyproject.toml", "build-constraint-dependencies", _ROOT_REMEDY, "then run: uv lock", _BUMP_HINT),
-        (_FILE_STALE,),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "root-entry-not-a-string": _DriftCase(
         _LOCKED,
         _FILE,
         [*_ROOT, 42],
-        None,
+        _RECORDED,
         ("root pyproject.toml", "build-constraint-dependencies", _ROOT_REMEDY, _BUMP_HINT),
-        (_FILE_STALE,),
+        (_FILE_STALE, _LOCK_STALE),
     ),
     "file-hash-differs": _DriftCase(
         _LOCKED,
         _FILE.replace(_HATCHLING_HASH, _HATCHLING_HASH_NEW),
         _ROOT,
-        None,
+        _RECORDED,
         (_FILE_STALE, "hatchling", _REGENERATE_CONSTRAINTS, _BUMP_HINT),
-        (_ROOT_STALE,),
+        (_ROOT_STALE, _LOCK_STALE),
     ),
     "lock-record-missing-package": _DriftCase(
         _LOCKED, _FILE, _ROOT, _RECORDED[:1], (_LOCK_STALE, "packaging", _BUMP_HINT), (_FILE_STALE, _ROOT_STALE)
@@ -1635,15 +1664,48 @@ _DRIFT_CASES = {
     "lock-record-empty": _DriftCase(
         _LOCKED, _FILE, _ROOT, [], (_LOCK_STALE, "hatchling", "packaging", _BUMP_HINT), (_FILE_STALE, _ROOT_STALE)
     ),
+    "lock-record-absent-root-set": _DriftCase(
+        _LOCKED, _FILE, _ROOT, [], (_LOCK_STALE, _BUMP_HINT), (_FILE_STALE, _ROOT_STALE, _ROOT_ABSENT)
+    ),
+    "lock-record-extra-key": _DriftCase(
+        _LOCKED,
+        _FILE,
+        _ROOT,
+        [{**_RECORDED[0], "marker": "python_full_version >= '3.12'"}, _RECORDED[1]],
+        (_LOCK_STALE, "marker", _NOT_EXACT, _BUMP_HINT),
+        (_FILE_STALE, _ROOT_STALE),
+    ),
+    "file-arbitrary-equality": _DriftCase(
+        _LOCKED,
+        _FILE.replace("hatchling==1.32.4", "hatchling===1.32.4"),
+        _ROOT,
+        _RECORDED,
+        (_FILE_STALE, "hatchling===1.32.4", _NOT_EXACT, _REGENERATE_CONSTRAINTS, _BUMP_HINT),
+        (_ROOT_STALE, _LOCK_STALE),
+    ),
+    "file-wildcard": _DriftCase(
+        _LOCKED,
+        _FILE.replace("hatchling==1.32.4", "hatchling==1.32.*"),
+        _ROOT,
+        _RECORDED,
+        (_FILE_STALE, "hatchling==1.32.*", _NOT_EXACT, _REGENERATE_CONSTRAINTS, _BUMP_HINT),
+        (_ROOT_STALE, _LOCK_STALE),
+    ),
+    "file-extra": _DriftCase(
+        _LOCKED,
+        _FILE.replace("hatchling==1.32.4", "hatchling[cli]==1.32.4"),
+        _ROOT,
+        _RECORDED,
+        (_FILE_STALE, "hatchling[cli]==1.32.4", _NOT_EXACT, _REGENERATE_CONSTRAINTS, _BUMP_HINT),
+        (_ROOT_STALE, _LOCK_STALE),
+    ),
 }
 
 
 @pytest.mark.ac("IDP-25:AC-3")
 @pytest.mark.parametrize("case", list(_DRIFT_CASES.values()), ids=list(_DRIFT_CASES))
 def test_build_constraint_drift_names_stale_source_and_remedy(case: _DriftCase) -> None:
-    drift = _build_constraint_drift
-    problems = drift(case.locked, case.constraints_text, case.root_entries, case.lock_recorded)
-    assert isinstance(problems, list)
+    problems = _build_constraint_drift(case.locked, case.constraints_text, case.root_entries, case.lock_recorded)
     if not case.expected:
         assert problems == []
         return
@@ -1659,8 +1721,7 @@ def test_root_build_constraint_dependencies_pin_build_constraints_file() -> None
         "root pyproject.toml has no [tool.uv] build-constraint-dependencies list (IDP-25 AC-1, human edit H1)"
     )
     pins, problems = _parse_exact_pins(root_entries, "root pyproject.toml")
-    assert problems == []
-    assert len(root_entries) == len(pins), f"duplicate entries in build-constraint-dependencies: {root_entries}"
+    assert problems == [], "; ".join(problems)
     assert "hatchling" in pins
     assert pins == {name: version for name, (version, _) in _constraints().items()}
 
@@ -1669,9 +1730,8 @@ def test_root_build_constraint_dependencies_pin_build_constraints_file() -> None
 @pytest.mark.ac("IDP-25:AC-3")
 def test_build_constraint_sources_agree() -> None:
     root_entries = _root_build_constraints(_ROOT_PYPROJECT.read_text())
-    lock_recorded = tomllib.loads(UV_LOCK.read_text()).get("manifest", {}).get("build-constraints")
-    drift = _build_constraint_drift
-    problems = drift(_locked_closure(), BUILD_CONSTRAINTS.read_text(), root_entries, lock_recorded)
+    lock_recorded = tomllib.loads(UV_LOCK.read_text()).get("manifest", {}).get("build-constraints", [])
+    problems = _build_constraint_drift(_locked_closure(), BUILD_CONSTRAINTS.read_text(), root_entries, lock_recorded)
     assert problems == [], "\n".join(problems)
 
 

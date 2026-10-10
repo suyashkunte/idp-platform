@@ -157,11 +157,11 @@ Status stays Proposed (IDP-24 spec, Q8).
   macOS `/tmp -> /private/tmp`) still builds.
 
 ### Known gaps (review of IDP-24)
-Found by both PR reviewers; open, not covered by this change.
+Found by both PR reviewers; open unless marked otherwise (IDP-25 partly resolved the first one).
 - Editable installs via `uv sync` (CI [`platform-ci.yml`](../../.github/workflows/platform-ci.yml) and `make setup`)
-  build idp-gate with the locked hatchling closure through the root `[tool.uv] build-constraint-dependencies`
-  (IDP-25), but those builds pin versions but not hashes: uv has no hash checking for sync builds. They also still see
-  the full environment.
+  are constrained to the locked hatchling closure by the root `[tool.uv] build-constraint-dependencies` (IDP-25).
+  Remaining limit: these builds pin versions but not hashes, because uv has no hash checking for sync builds. They
+  also still see the full environment.
 - The hashes protect against substitution on the index or network, not against a tampered local uv cache
   (`UV_CACHE_DIR` is kept). The interpreter taken from `UV_PYTHON_INSTALL_DIR` is not hashed.
 - Only `UV_*`/`PIP_*` are stripped; `PYTHONPATH`, `HATCH_BUILD_*` and similar variables still reach the build backend.
@@ -175,10 +175,10 @@ Status stays Proposed.
 
 ### Build constraints for `uv sync`
 - The root [`pyproject.toml`](../../pyproject.toml) sets `[tool.uv] build-constraint-dependencies` to `==` pins of the
-  hatchling closure. uv applies it to every build in the workspace, including the editable idp-gate build that
-  `uv sync --all-packages` runs in CI and `make setup`. It lives in the root file because `uv sync` has no
-  build-constraint flag and uv reads the setting only from the workspace root. The root file is a protected path, so
-  a human edits it.
+  hatchling closure. Per uv documentation, uv applies it to every build in the workspace, including the editable
+  idp-gate build that `uv sync --all-packages` runs in CI and `make setup`, and reads the setting only from the
+  workspace root; `uv sync` has no build-constraint flag, so the root file is the only place for it. The root file is a
+  protected path, so a human edits it.
 - Four sources must agree, with [`uv.lock`](../../uv.lock) as the reference: the hatchling closure locked in uv.lock,
   [`packages/idp-gate/build-constraints.txt`](../../packages/idp-gate/build-constraints.txt) (versions and hashes),
   the root list (versions), and the `[manifest] build-constraints` record that `uv lock` writes into uv.lock (uv
@@ -191,7 +191,8 @@ Status stays Proposed.
 - Bump order: `uv lock --upgrade-package hatchling`, regenerate build-constraints.txt (IDP-24 command), a human
   updates the root list, then `uv lock` again. Commit all three files together.
 - An existing environment keeps its old editable build; rebuild it locally with
-  `uv sync --all-packages --reinstall-package idp-gate`. `test_installed_idp_gate_was_built_by_locked_hatchling`
-  checks that the installed editable idp-gate reports `Generator: hatchling <locked version>`.
+  `uv sync --all-packages --reinstall-package idp-gate`. `test_installed_idp_gate_was_built_by_locked_hatchling` is
+  a smoke check: the installed editable idp-gate reports `Generator: hatchling <locked version>`.
 - H1 findings: `uv lock --offline` was enough, `uv lock` added only the `[manifest] build-constraints` record, and no
-  package versions changed.
+  package versions changed. H1's `Generator: hatchling 1.32.4` does not prove the constraint was applied: an
+  unconstrained build would also pick 1.32.4 while that is the newest release on the index.
