@@ -110,6 +110,25 @@ Facts checked for amendment 1 (branch at 429b6a2):
 - Amendment 1 (2026-10-10, after review loop 1): AC-6..AC-14 added; Q2, Q7, Q15 and Q16 superseded (old and new
   answers recorded in place); Q18-Q28 added; edge cases, NFRs, out of scope and traceability extended; T8-T14 added;
   T7 extended to document the new behaviour. AC-1..AC-5 are unchanged.
+- Amendment 2 (2026-10-10, after T8; narrow): AC-13's text amended minimally to also cover `~` after make's
+  leading `./` runs (`./~/x.mk`); edge case and ASSUMPTION A13 corrected; AC-13 test list extended; T8 results
+  recorded. AC-1..AC-12 and AC-14 are unchanged.
+
+## Amendment 2 (2026-10-10, after T8)
+T8 ran the amendment 1 assumptions against GNU Make 3.81 in the scratchpad (`t8/`, evidence in `t8/out.txt`).
+- Finding (A13 was wrong in one detail): make 3.81 strips leading `./` runs from an include word (`./`, `.//`,
+  `././`: a `.` followed by one or more `/`, repeated) and only then expands a leading `~`. So `-include ./~/x.mk`
+  reads `$HOME/x.mk` (`make -d`: "Reading makefile `<home>/x.mk' ... (no ~ expansion)", case `tilde_mid`/iso1).
+  Amendment 1 called `./~/x.mk` a literal word. AC-13 now rejects it.
+- Still literal (confirmed): `a~b.mk` (read as `a~b.mk`) and `sub/../~/x.mk` (no leading `./` run, so no tilde
+  expansion; make reads `<svc>/sub/../~/x.mk`).
+- Confirmations relevant for the reviewer:
+  - A8 confirmed: in a skipped branch, `ifeq (a,b)` / `define A` / `define B` / `endef` / `endif` /
+    `-include gen.mk` makes make read the include (the nested `define` is not counted), so counting nesting like
+    `do_define` would have hidden it. AC-10 failing closed is the right choice (Q19).
+  - Q18 confirmed: make defines `verify` from `\` + `verify:`; the scanner does not credit it (fail closed, as
+    specified in AC-8).
+  - A7 and A12 and the other T8 checks matched the spec.
 
 ## Requirements
 - **AC-1** Given an example whose `Makefile` has `X = \` followed by `define Y`, a `-include gen.mk` line, a rule that generates `gen.mk`, and a later `define Z`/`endef` pair, when I run `idp conformance`, then `gen.mk` is recorded in the scan's include words and pinned with `--assume-old`, make does not create `gen.mk`, and the validated `verify` recipe runs.
@@ -377,17 +396,28 @@ Facts checked for amendment 1 (branch at 429b6a2):
     - a real-make conformance test parametrized over `private define X = 1` and `export define X = 1`, each followed
       by the AC-1 `gen.mk` attack. Expected: FAIL with the detail line, exit 1, no `evil-ran`, `validated-ran` or
       `gen.mk`. It must be red before the fix (reproduced on 3.81: PASS and `evil-ran`; on 4.x: PASS).
-- **AC-13** (edge) Given a `Makefile` or scanned include with an include word that starts with `~` (for example `-include ~/evil.mk` or `include ~user/x.mk`), when I run `idp validate`, then it exits 1 with `include '<word>' is outside the service directory`, and `idp conformance` does not run make for that example.
+- **AC-13** (edge) Given a `Makefile` or scanned include with an include word that starts with `~`, also after leading `./` runs (for example `-include ~/evil.mk`, `include ~user/x.mk` or `-include ./~/evil.mk`), when I run `idp validate`, then it exits 1 with `include '<word>' is outside the service directory`, and `idp conformance` does not run make for that example.
   - Added by amendment 1 (security M4). make expands a leading `~` (`$HOME`) or `~user` in include words.
+  - Amendment 2 (T8 finding): make first strips leading `./` runs and then expands `~`. The AC text gained
+    "also after leading `./` runs" and the `./~/evil.mk` example; meaning otherwise unchanged.
+  - Rule: strip leading `./` runs from the word as make does (repeatedly remove a `.` followed by one or more `/`,
+    e.g. with `re.sub(r"^(?:\./+)+", "", word)`, linear), then reject if what remains starts with `~`. The message
+    shows the word as written (`include './~/evil.mk' is outside the service directory`).
   - Checked in `_lexically_outside`, next to absolute words and `..` escapes, so the IDP-17 message, cap and
     "not queued" behaviour apply unchanged (Q24). A `~` elsewhere in a word (`a~b.mk`) is not expanded by make and
     stays a normal literal word. A `$` word starting with `~` is already unpinnable (AC-4).
+  - `sub/../~/x.mk` stays an accepted literal word (amendment 2 decision): make does not expand it (no leading `./`
+    run), and the IDP-17 outside-directory check does not fire because `normpath` gives `~/x.mk`, a relative path
+    inside the service directory. make reads `<svc>/sub/../~/x.mk`, which is the file the scanner follows, scans and
+    pins as written.
   - Verified by:
-    - a `tmp_path` validate test parametrized over `~/evil.mk`, `~user/x.mk` and `~` (exact JSON message, exit 1),
-      and `a~b.mk` (accepted, recorded);
-    - a real-make conformance test with `HOME` set (monkeypatched) to `tmp_path/home` holding an `evil.mk` with
-      `EVIL_INCLUDE`, and `-include ~/evil.mk` in the example. Expected: FAIL with the detail line, exit 1, no
-      `evil-ran`, no `validated-ran`. It must be red before the fix (reproduced: PASS and `evil-ran`).
+    - a `tmp_path` validate test parametrized over `~/evil.mk`, `~user/x.mk`, `~`, `./~/evil.mk`, `.//~/evil.mk`
+      and `././~/evil.mk` (exact JSON message with the word as written, exit 1), and the accepted literal words
+      `a~b.mk` and `sub/../~/x.mk` (exit 0, recorded in `include_words`);
+    - a real-make conformance test parametrized over `-include ~/evil.mk` and `-include ./~/evil.mk`, with `HOME`
+      set (monkeypatched) to `tmp_path/home` holding an `evil.mk` with `EVIL_INCLUDE`. Expected: FAIL with the
+      detail line, exit 1, no `evil-ran`, no `validated-ran`. It must be red before the fix (reproduced on 3.81 for
+      both: PASS and `evil-ran`).
 - **AC-14** (edge) Given an example whose Makefile includes `$(IDP_PROFILE_DIR)/<rest>` where a `/`-separated segment of `<rest>` is `..` or `<rest>` starts with `/`, when I run `idp conformance`, then that example is reported `FAIL <x>: dynamic include '<word>' cannot be pinned` and make is not run.
   - Added by amendment 1 (security M5; supersedes Q7's "`..` is allowed").
   - `_profile_names` treats such a word as unpinnable, with the AC-4 message and order (first unpinnable word,
@@ -470,7 +500,9 @@ Facts checked for amendment 1 (branch at 429b6a2):
     fails anyway.
   - An ignored conditional branch that contains a plain `define A` ... `endef`: make skips it and the scanner skips
     the same lines (same closing rule), so nothing changes.
-  - `~` inside a word or after `./` (`./~/x.mk`) is not expanded by make: a normal literal word (AC-13).
+  - `~` inside a word (`a~b.mk`) or after a non-`./` prefix (`sub/../~/x.mk`) is not expanded by make: a normal
+    literal word. Amendment 2 correction: after leading `./` runs (`./~/x.mk`, `.//~/x.mk`, `././~/x.mk`) it IS
+    expanded, and AC-13 rejects it.
   - `.RECIPEPREFIX` (make 3.82+, so 4.x in CI) changes which lines are recipe lines, which also changes the
     "tab-prefixed" rules of AC-9 and AC-10. Not covered by this amendment (Q27).
 - ASSUMPTION A7 (AC-6): GNU make 3.81 and 4.x collapse `[blanks]` + an odd backslash run + newline + `[blanks]`
@@ -488,8 +520,10 @@ Facts checked for amendment 1 (branch at 429b6a2):
 - ASSUMPTION A12: `override define NAME` opens a define block in GNU make 3.81 and 4.x, in taken and skipped
   branches, so it needs no violation (Q20). `export`/`unexport`/`private define` differ (3.81 reads an assignment or
   an export directive). Checked in T8.
-- ASSUMPTION A13: GNU make expands a leading `~` or `~user` in include words (reproduced on 3.81; 4.x documents the
-  same). Other positions are not expanded.
+- ASSUMPTION A13 (corrected by amendment 2 after T8): GNU make strips leading `./` runs (a `.` followed by one or
+  more `/`, repeated) from an include word and then expands a leading `~` or `~user` (reproduced on 3.81:
+  `./~/x.mk` reads `$HOME/x.mk`; 4.x is expected to behave the same and is covered by the CI run of the real-make
+  test). No other position is expanded (`a~b.mk`, `sub/../~/x.mk` stay literal, confirmed on 3.81).
 
 ### Tests that change (amendment 1)
 Existing tests whose expectations the amendment changes (all others, including every IDP-22 AC-7 case and every
@@ -703,6 +737,8 @@ Deferred by the human to follow-up tickets (recorded in the docs' residual-risk 
 - Q24: `~` include words. Proposed: reuse the IDP-17 message `include '<word>' is outside the service directory`
   (AC-13), reject only a leading `~`, and keep the existing problem cap and "not queued" behaviour. Alternative: a
   dedicated message (`... uses ~, which make expands to a home directory`).
+  - Amendment 2: "leading" means after make's leading `./` runs are stripped (T8 finding); the message still shows
+    the word as written.
 - Q25: should AC-14 also resolve `<profile_dir>/<rest>` and require the real path to stay inside the real profile
   directory (symlinks)? Proposed: no. The profile directory is platform-owned and reviewed; a lexical rule is enough
   and needs no filesystem access in conformance.

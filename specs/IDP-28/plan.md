@@ -297,7 +297,10 @@ reads in any conditional branch.
    `tuple[list[_Line], list[Violation]] | Violation`. It maps `"ambiguous"` to `_ambiguous_define_line(name)` and
    `"modifier"` to `_modifier_define(name)` (AC-10/AC-12 messages, `path` `Makefile`). `visit` reports each through
    `self.problem` (cap 20) and then scans the lines.
-5. **`~` include words (AC-13)**: `_lexically_outside(word, root)` returns True also when `word.startswith("~")`.
+5. **`~` include words (AC-13)**: `_lexically_outside(word, root)` returns True also when
+   `_LEADING_DOT_SLASH.sub("", word).startswith("~")`, with `_LEADING_DOT_SLASH = re.compile(r"^(?:\./+)+")`
+   (amendment 2: make strips leading `./` runs before tilde expansion; anchored, linear). The violation shows the
+   word as written.
 6. **Public display helper (spec Q28, m8)**: rename `_shown` to `shown` and update its contract call sites
    (`_cannot_read`, `_outside`, `_backslash_include`, `_foreign_separator`, the size message and the new messages).
 
@@ -350,7 +353,10 @@ reads in any conditional branch.
   `override define X`, each followed by `endef`; `export define ?= 3`; `define X = 1` / `endef`) with exit 0.
 - `test_include_word_starting_with_tilde_is_a_violation` (AC-13): `_make_messages` gives
   `["include '~/evil.mk' is outside the service directory"]` for `-include ~/evil.mk`, likewise `~user/x.mk` and
-  `~`; `-include a~b.mk` is valid and recorded in `include_words`.
+  `~`; amendment 2 adds `./~/evil.mk`, `.//~/evil.mk` and `././~/evil.mk` (message shows the word as written, e.g.
+  `include './~/evil.mk' is outside the service directory`). Accepted literal words: `-include a~b.mk` and
+  `-include sub/../~/x.mk` are valid and recorded in `include_words` (the latter normalises to `~/x.mk` inside the
+  service directory, so the IDP-17 outside check does not fire, and make does not expand it).
 - Changed (spec "Tests that change"): `test_define_bodies_are_skipped_including_nested_ones` (accepted forms only);
   `test_nul_byte_in_include_word_is_a_violation_not_a_traceback` (AC-11 message).
 - Linear-time cases: `test_many_continued_lines_are_joined_in_linear_time` gains `"\\\n  x" * 200_000` (collapsing);
@@ -379,9 +385,10 @@ any test-written source) in the directory.
   Expected FAIL with the AC-11 detail line and no generated file.
 - `test_modifier_define_cannot_hide_generated_include` (AC-12, `needs_make`, parametrized `private define X = 1`
   and `export define X = 1`, each followed by the `gen.mk` attack). Expected FAIL with the AC-12 detail line.
-- `test_tilde_include_cannot_read_home_file` (AC-13, `needs_make`): `monkeypatch.setenv("HOME", str(tmp_path /
-  "home"))`, `home/evil.mk` holding `EVIL_INCLUDE`, the example appends `-include ~/evil.mk`. Expected FAIL with
-  `Makefile: include '~/evil.mk' is outside the service directory`, no `evil-ran`.
+- `test_tilde_include_cannot_read_home_file` (AC-13, `needs_make`, parametrized `~/evil.mk` and `./~/evil.mk`
+  (amendment 2)): `monkeypatch.setenv("HOME", str(tmp_path / "home"))`, `home/evil.mk` holding `EVIL_INCLUDE`, the
+  example appends `-include <word>`. Expected FAIL with `Makefile: include '<word>' is outside the service
+  directory`, no `evil-ran`.
 - `test_profile_dir_include_cannot_read_outside_profile_dir` (AC-14, `needs_make`): `_temporary_profile`,
   `tmp_path/outside/evil.mk` holding `EVIL_INCLUDE`, the example appends
   `-include $(IDP_PROFILE_DIR)/../outside/evil.mk`. Expected stdout

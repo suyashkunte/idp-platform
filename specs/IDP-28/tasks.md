@@ -83,7 +83,11 @@ Real-make tests use `needs_make`, explicit `os.utime` with `OLD_MTIME`/`NEW_MTIM
 Make 3.81 (local) and 4.x (CI). Test names and expectations are in plan.md ("Amendment 1", "Tests"). T7 runs after
 T14.
 
-- [ ] T8 Confirm make's reader in the scratchpad (not committed, no repo change).
+- [x] T8 Confirm make's reader in the scratchpad (not committed, no repo change). Done with a finding (amendment 2):
+  every assumption held on 3.81 except A13. make strips leading `./` runs before tilde expansion, so
+  `-include ./~/x.mk` reads `$HOME/x.mk` (scratchpad `t8/out.txt`). A8 confirmed (a skipped-branch nested define
+  does not hide the include from make, so AC-10 failing closed is right); Q18 confirmed (make defines `verify` from
+  `\` + `verify:`). The `./~` case is folded into T13; spec AC-13 and A13 amended.
   - With the local GNU Make 3.81, confirm: (a) a line holding only `\` + `  endef` closes a define body, also with CRLF
     (A7); (b) `override \` + `define Y` opens a block (A7, A12); (c) `override define Y` inside an `ifeq (a,b)` branch
     is skipped up to its `endef` (A12); (d) `private define X = 1` and `export define X = 1` are not define blocks
@@ -136,10 +140,12 @@ T14.
     change"). Confirm every AC-2 test stays green unchanged.
   - (AC-11) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
     packages/idp-gate/tests/test_conformance.py.
-- [ ] T13 Include words starting with `~`.
-  - Add `test_include_word_starting_with_tilde_is_a_violation` (red) and `needs_make`
-    `test_tilde_include_cannot_read_home_file` (`HOME` monkeypatched to `tmp_path/home`; red: PASS and `evil-ran`).
-  - Then add the `~` check to `_lexically_outside`.
+- [ ] T13 Include words starting with `~` (also after leading `./` runs; amendment 2).
+  - Add `test_include_word_starting_with_tilde_is_a_violation` (cases `~/evil.mk`, `~user/x.mk`, `~`,
+    `./~/evil.mk`, `.//~/evil.mk`, `././~/evil.mk`; accepted literals `a~b.mk`, `sub/../~/x.mk`) (red) and
+    `needs_make` `test_tilde_include_cannot_read_home_file` parametrized `~/evil.mk` and `./~/evil.mk` (`HOME`
+    monkeypatched to `tmp_path/home`; red: PASS and `evil-ran`).
+  - Then add the `~` check to `_lexically_outside`, after stripping leading `./` runs (`_LEADING_DOT_SLASH`).
   - (AC-13) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
     packages/idp-gate/tests/test_conformance.py.
 - [ ] T14 Profile words outside the profile directory; shared display helper.
