@@ -296,8 +296,13 @@ def _enabled_test_kinds(doc: Any) -> list[str]:
 def load_service(path: Path) -> tuple[Any, list[Violation]]:
     """Parsed `idp.yaml` and its violations: schema, then Make contract (skipped if the YAML is not a mapping).
 
-    On invalid YAML the document is None and the only violation is the parse error."""
-    doc, errors = _load_yaml(path)
+    On invalid YAML, or a file that cannot be read or decoded, the document is None and the only violation says so."""
+    try:
+        doc, errors = _load_yaml(path)
+    except UnicodeDecodeError as exc:  # a ValueError, not an OSError
+        return None, [Violation("", f"cannot read: not valid UTF-8 ({exc.reason} at byte {exc.start})")]
+    except OSError as exc:
+        return None, [Violation("", f"cannot read: {exc.strerror or exc}")]
     if errors:
         return None, errors
     violations = validate_document(doc)
