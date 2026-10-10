@@ -24,7 +24,7 @@ package tests green. Test names and exact expectations are in plan.md ("Tests").
   - Check red-first by stashing T1's `contract.py` change (make generates `gen.mk` and `evil-ran` appears), then
     green with T1.
   - (AC-1) Files: packages/idp-gate/tests/test_conformance.py.
-- [ ] T3 Foreign line separators.
+- [x] T3 Foreign line separators.
   - Add `test_line_separator_make_does_not_use_is_a_violation` (every listed separator, an in-include case, `--json`),
     `test_crlf_makefile_is_accepted`, and the `needs_make` `test_conformance_rejects_foreign_line_separators_without_running_make`
     (`\x0b`, `\x85`; explicit `os.utime`, no sleeps). All red.

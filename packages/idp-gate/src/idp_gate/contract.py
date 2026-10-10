@@ -28,6 +28,9 @@ _TARGET_VARIABLE = re.compile(r"\s*(?:(?:export|override|private)\s+)*[^\s:=#;]+
 _DEFINE_START = re.compile(r"^\s*(?:(?:override|export|private)\s+)*define(?:\s|$)(?!\s*(?::{1,3}|[+?!])?=)")
 _DEFINE_END = re.compile(r"^\s*endef(?:\s|$)")
 _COMMENT = re.compile(r"(?<!\\)#")  # `\#` is a literal hash, not a comment
+# Characters Python may split lines on but make does not (make splits on LF only and drops CR before LF).
+# One character class plus a one-character lookahead: never backtracks.
+_FOREIGN_SEPARATOR = re.compile("\r(?!\n)|[\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")
 # Tenant repos are untrusted (CI runs this on PRs): cap what a Makefile and its includes can make us read or report.
 MAX_MAKEFILE_BYTES = 1024 * 1024
 MAX_MAKEFILES = 64
@@ -176,6 +179,14 @@ def _backslash_include(name: str) -> Violation:
     )
 
 
+def _foreign_separator(name: str, match: re.Match[str]) -> Violation:
+    char = match.group()
+    what = "CR not followed by LF" if char == "\r" else f"U+{ord(char):04X}"
+    return Violation(
+        MAKE_PATH, f"{_shown(name)} contains a line separator make does not use ({what}); use LF or CRLF line endings"
+    )
+
+
 def _lexically_outside(word: str, root: Path) -> bool:
     """Absolute words and `..` escapes are rejected before touching the filesystem."""
     return Path(word).is_absolute() or not Path(os.path.normpath(root / word)).is_relative_to(root)
@@ -197,7 +208,8 @@ def _locate(path: Path, word: str | None, root: Path) -> Path | Violation | None
 
 
 def _load_makefile(resolved: Path, name: str) -> list[str] | Violation:
-    """Parsed lines of a confined regular file, or a Violation (not a regular file, unreadable, too large)."""
+    """Parsed lines of a confined regular file, or a Violation (not a regular file, unreadable, too large, or using a
+    line separator make does not use)."""
     if not resolved.is_file():  # directories, FIFOs, devices: never opened
         return _cannot_read(name)
     try:
@@ -206,6 +218,8 @@ def _load_makefile(resolved: Path, name: str) -> list[str] | Violation:
         return _cannot_read(name)
     if text is None:
         return Violation(MAKE_PATH, f"{_shown(name)} exceeds 1 MiB")
+    if match := _FOREIGN_SEPARATOR.search(text):
+        return _foreign_separator(name, match)
     return _parsed_lines(text)
 
 
