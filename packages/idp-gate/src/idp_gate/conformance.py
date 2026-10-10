@@ -48,7 +48,17 @@ def _tail(output: str) -> tuple[str, ...]:
 
 
 def _run_make_verify(directory: Path, make: str, profile_dir: str) -> Result:
-    argv = [make, "--no-print-directory", "-C", str(directory), "verify", f"IDP_PROFILE_DIR={profile_dir}"]
+    # `-f Makefile`: make reads only the validated Makefile, never a GNUmakefile/makefile beside it.
+    argv = [
+        make,
+        "--no-print-directory",
+        "-C",
+        str(directory),
+        "-f",
+        contract.MAKE_PATH,
+        "verify",
+        f"IDP_PROFILE_DIR={profile_dir}",
+    ]
     try:
         # List-form argv, no shell for argv; `make` is an absolute path from shutil.which. make itself runs the
         # example's recipes via /bin/sh: examples/ is platform-owned (reviewed like code), not tenant-contributed.
