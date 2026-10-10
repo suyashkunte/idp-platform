@@ -140,7 +140,7 @@ T14.
     change"). Confirm every AC-2 test stays green unchanged.
   - (AC-11) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
     packages/idp-gate/tests/test_conformance.py.
-- [ ] T13 Include words starting with `~` (also after leading `./` runs; amendment 2).
+- [x] T13 Include words starting with `~` (also after leading `./` runs; amendment 2).
   - Add `test_include_word_starting_with_tilde_is_a_violation` (cases `~/evil.mk`, `~user/x.mk`, `~`,
     `./~/evil.mk`, `.//~/evil.mk`, `././~/evil.mk`; accepted literals `a~b.mk`, `sub/../~/x.mk`) (red) and
     `needs_make` `test_tilde_include_cannot_read_home_file` parametrized `~/evil.mk` and `./~/evil.mk` (`HOME`

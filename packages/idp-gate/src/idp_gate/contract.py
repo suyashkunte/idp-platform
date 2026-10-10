@@ -31,6 +31,9 @@ _TARGET_VARIABLE = re.compile(r"\s*(?:(?:export|override|private)\s+)*[^\s:=#;]+
 _DEFINE_LINE = re.compile(
     r"[ \t]*((?:(?:override|export|unexport|private)[ \t]+)*)define(?:[ \t]|$)(?![ \t]*(?::{1,3}|[+?!])?=)"
 )
+# Leading `./` runs, which make strips from an include word before expanding a leading `~`. Anchored; each `/+` run
+# is bounded by the next `.`, so a failed match backtracks at most once per run: linear.
+_LEADING_DOT_SLASH = re.compile(r"^(?:\./+)+")
 _COMMENT = re.compile(r"(?<!\\)#")  # `\#` is a literal hash, not a comment
 # Line separators make does not use (make splits on LF only and drops a CR before LF), rejected so that no line
 # boundary is ambiguous. One character class plus a one-character lookahead: never backtracks.
@@ -279,7 +282,10 @@ def _foreign_separator(name: str, match: re.Match[str]) -> Violation:
 
 
 def _lexically_outside(word: str, root: Path) -> bool:
-    """Absolute words and `..` escapes are rejected before touching the filesystem."""
+    """Absolute words, `..` escapes and words make tilde-expands (`~`, `~user`, also after leading `./` runs) are
+    rejected before touching the filesystem."""
+    if _LEADING_DOT_SLASH.sub("", word).startswith("~"):
+        return True
     return Path(word).is_absolute() or not Path(os.path.normpath(root / word)).is_relative_to(root)
 
 
@@ -346,8 +352,9 @@ class _Scanner:
 
     def queue(self, word: str) -> None:
         """Record each distinct spelling and queue the word once per normalised spelling; stop past
-        MAX_INCLUDE_WORDS distinct spellings or normalised words."""
-        if not self.stopped and word not in self.seen_spellings:
+        MAX_INCLUDE_WORDS distinct spellings or normalised words. Lexically outside words are queued (so `visit`
+        reports them) but not recorded: they always fail validation and are never pinned."""
+        if not self.stopped and word not in self.seen_spellings and not _lexically_outside(word, self.root):
             if len(self.seen_spellings) >= MAX_INCLUDE_WORDS:
                 self.stop(f"too many include words (limit {MAX_INCLUDE_WORDS})")
                 return

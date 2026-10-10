@@ -301,6 +301,7 @@ reads in any conditional branch.
    `_LEADING_DOT_SLASH.sub("", word).startswith("~")`, with `_LEADING_DOT_SLASH = re.compile(r"^(?:\./+)+")`
    (amendment 2: make strips leading `./` runs before tilde expansion; anchored, linear). The violation shows the
    word as written.
+   - T13 deviation: `_Scanner.queue` also skips recording the spelling of any `_lexically_outside` word (still queued, so `visit` reports it in the same order under the same caps), because IDP-17 recorded outside words in `include_words` despite Q24's "not queued" intent; outside words always fail validation so are never pinned, and they no longer count toward the spelling cap but stay bounded by the normalised-word and problem caps.
 6. **Public display helper (spec Q28, m8)**: rename `_shown` to `shown` and update its contract call sites
    (`_cannot_read`, `_outside`, `_backslash_include`, `_foreign_separator`, the size message and the new messages).
 
