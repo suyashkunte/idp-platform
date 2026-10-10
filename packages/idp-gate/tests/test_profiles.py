@@ -23,6 +23,8 @@ from importlib import resources
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import pytest
 import yaml
@@ -1678,7 +1680,9 @@ def test_installed_idp_gate_was_built_by_locked_hatchling() -> None:
     assert direct_url is not None, setup_hint
     origin = json.loads(direct_url)
     assert origin.get("dir_info") == {"editable": True}, setup_hint
-    assert origin.get("url") == PACKAGE_DIR.resolve().as_uri(), setup_hint
+    url = urlparse(str(origin.get("url", "")))
+    assert url.scheme == "file", setup_hint
+    assert Path(url2pathname(url.path)).resolve() == PACKAGE_DIR.resolve(), setup_hint
     wheel = dist.read_text("WHEEL")
     assert wheel is not None, setup_hint
     generators = [line for line in wheel.splitlines() if line.startswith("Generator:")]
