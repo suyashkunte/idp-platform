@@ -430,7 +430,8 @@ def test_too_many_include_words_is_a_violation(
     assert _make_messages(tmp_path, monkeypatch, capsys) == ["too many include words (limit 1024)"]
     _write_makefile(tmp_path)
     with (tmp_path / "Makefile").open("a") as fh:
-        fh.write(f"-include {' '.join(words[:-1])} ./missing0.mk\n")  # 1024 distinct words (./ normalised) is fine
+        # 1024 distinct spellings is fine; a repeated spelling is not counted again (IDP-22 AC-5 caps spellings)
+        fh.write(f"-include {' '.join(words[:-1])} missing0.mk\n")
     assert contract.makefile_targets(tmp_path / "Makefile").violations == ()
 
 
