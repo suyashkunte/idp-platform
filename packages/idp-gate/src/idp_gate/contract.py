@@ -81,6 +81,9 @@ class MakefileScan:
     include_words: tuple[str, ...] = ()  # distinct literal include words as written, in first-seen order
 
 
+_EMPTY_SCAN = MakefileScan(frozenset(), ())  # returned when the Makefile was not scanned
+
+
 def _is_include_line(line: str) -> bool:
     """True if the first word of `line` is `include`, `-include` or `sinclude`."""
     words = line.split(maxsplit=1)
@@ -324,12 +327,17 @@ def check_make_contract(doc: Any, makefile: Path) -> list[Violation]:
 
     Entries that would shadow the Makefile (`GNUmakefile`/`makefile`, any case) are reported first. If the Makefile
     or an include cannot be read safely, only those problems follow (the target list would be incomplete)."""
+    return _make_contract(doc, makefile)[0]
+
+
+def _make_contract(doc: Any, makefile: Path) -> tuple[list[Violation], MakefileScan]:
+    """`check_make_contract`'s violations and the single scan they were computed from (empty if not scanned)."""
     if not makefile.is_file():
-        return [Violation(MAKE_PATH, "Makefile not found")]
+        return [Violation(MAKE_PATH, "Makefile not found")], _EMPTY_SCAN
     extra = _extra_makefiles(makefile.parent)
     scan = makefile_targets(makefile)
     if scan.violations:
-        return extra + list(scan.violations)
+        return extra + list(scan.violations), scan
     targets = scan.targets
     violations = extra + [
         Violation(MAKE_PATH, f"missing required target '{t}'") for t in REQUIRED_TARGETS if t not in targets
@@ -338,7 +346,7 @@ def check_make_contract(doc: Any, makefile: Path) -> list[Violation]:
         Violation(MAKE_PATH, f"missing target 'test-{k}' (required because spec.tests.{k} is true)")
         for k in _enabled_test_kinds(doc)
         if f"test-{k}" not in targets
-    ]
+    ], scan
 
 
 def _enabled_test_kinds(doc: Any) -> list[str]:
@@ -350,24 +358,26 @@ def _enabled_test_kinds(doc: Any) -> list[str]:
     return [k for k in TEST_KINDS if tests.get(k) is True]
 
 
-def load_service(path: Path) -> tuple[Any, list[Violation]]:
-    """Parsed `idp.yaml` and its violations: schema, then Make contract (skipped if the YAML is not a mapping).
+def load_service(path: Path) -> tuple[Any, list[Violation], MakefileScan]:
+    """Parsed `idp.yaml`, its violations (schema, then Make contract; skipped if the YAML is not a mapping) and the
+    Makefile scan those violations were computed from (empty if the Makefile was not scanned).
 
     On invalid YAML, or a file that cannot be read or decoded, the document is None and the only violation says so."""
     try:
         doc, errors = _load_yaml(path)
     except UnicodeDecodeError as exc:  # a ValueError, not an OSError
-        return None, [Violation("", f"cannot read: not valid UTF-8 ({exc.reason} at byte {exc.start})")]
+        return None, [Violation("", f"cannot read: not valid UTF-8 ({exc.reason} at byte {exc.start})")], _EMPTY_SCAN
     except OSError as exc:
-        return None, [Violation("", f"cannot read: {exc.strerror or exc}")]
+        return None, [Violation("", f"cannot read: {exc.strerror or exc}")], _EMPTY_SCAN
     except RecursionError:  # the YAML parser recurses per nesting level
-        return None, [Violation("", "cannot parse: nesting too deep")]
+        return None, [Violation("", "cannot parse: nesting too deep")], _EMPTY_SCAN
     if errors:
-        return None, errors
+        return None, errors, _EMPTY_SCAN
     violations = validate_document(doc)
-    if isinstance(doc, dict):
-        violations += check_make_contract(doc, path.parent / MAKE_PATH)
-    return doc, violations
+    if not isinstance(doc, dict):
+        return doc, violations, _EMPTY_SCAN
+    make_violations, scan = _make_contract(doc, path.parent / MAKE_PATH)
+    return doc, violations + make_violations, scan
 
 
 def validate_service(path: Path) -> list[Violation]:

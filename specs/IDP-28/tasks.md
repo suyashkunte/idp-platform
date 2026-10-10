@@ -31,7 +31,7 @@ package tests green. Test names and exact expectations are in plan.md ("Tests").
   - Then implement `_FOREIGN_SEPARATOR`, `_foreign_separator` and the check in `_load_makefile`.
   - (AC-2) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
     packages/idp-gate/tests/test_conformance.py.
-- [ ] T4 Single validated scan.
+- [x] T4 Single validated scan.
   - Add `test_conformance_scans_makefile_once_and_pins_from_validated_scan` (red: two calls, no sentinel pin).
   - Then implement `_EMPTY_SCAN`, `_make_contract`, the `check_make_contract` delegation, the 3-tuple
     `load_service`, and `check_example` using that scan (second `makefile_targets` call removed).

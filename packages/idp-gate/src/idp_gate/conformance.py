@@ -131,16 +131,13 @@ def check_example(directory: Path, make: str, root: Path) -> Result:
     if _outside(directory, root):
         return Result(directory, ok=False, reason="outside examples directory")
     path = directory / EXAMPLE_FILE
-    doc, violations = contract.load_service(path)
+    doc, violations, scan = contract.load_service(path)
     if violations:
         return _invalid(directory, violations)
     try:
         profile_dir = str(profiles.resolve(doc["spec"]["build"]["profile"])["dir"])
     except profiles.ProfileError as exc:
         return Result(directory, ok=False, reason="profile: " + "; ".join(exc.lines))
-    scan = contract.makefile_targets(directory / contract.MAKE_PATH)  # include words to pin; files may have changed
-    if scan.violations:
-        return _invalid(directory, scan.violations)
     assume_old = _assume_old(scan.include_words)
     if assume_old is None:
         return Result(directory, ok=False, reason="include words exceed the make argument limit")
