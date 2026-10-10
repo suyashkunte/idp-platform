@@ -41,3 +41,6 @@ versions follow [Semantic Versioning](https://semver.org/).
 - IDP-24: idp-gate builds use a hashed build-constraints file generated from uv.lock (hatchling pinned and
   hash-checked); test builds run without UV_*/PIP_* variables and user uv config; the build hook never follows
   symlinked profile directories and fails closed when build-profiles itself is a symlink.
+- IDP-25: uv sync builds of the editable idp-gate (CI, make setup) use the locked hatchling closure via
+  `[tool.uv] build-constraint-dependencies` (versions pinned, not hashes); a drift test keeps uv.lock (closure and its
+  build-constraints record), build-constraints.txt and the root list in step.

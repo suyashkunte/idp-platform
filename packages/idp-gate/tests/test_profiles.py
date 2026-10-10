@@ -4,6 +4,9 @@ IDP-21: reproducible tool resolution (`--exclude-newer`) and clean, sdist-safe p
 
 IDP-24: hashed build constraints for the build backend, a clean `uv build` environment, and no symlink following in
 the build hook.
+
+IDP-25: uv sync builds use the locked build backend via the root `[tool.uv] build-constraint-dependencies`; a drift
+check keeps uv.lock, build-constraints.txt and the root list in step.
 """
 
 import importlib
