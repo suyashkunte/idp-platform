@@ -75,6 +75,7 @@ class MakefileScan:
 
     targets: frozenset[str]
     violations: tuple[Violation, ...]
+    include_words: tuple[str, ...] = ()  # distinct literal include words as written, in first-seen order
 
 
 def _include_words(line: str) -> list[str]:
@@ -188,6 +189,8 @@ class _Scanner:
     problems: list[Violation] = field(default_factory=list)
     pending: deque[tuple[Path, str | None]] = field(default_factory=deque)
     words: set[str] = field(default_factory=set)
+    spellings: list[str] = field(default_factory=list)
+    seen_spellings: set[str] = field(default_factory=set)
     visited: set[Path] = field(default_factory=set)
     stopped: bool = False
 
@@ -203,7 +206,14 @@ class _Scanner:
             self.problems.append(violation)
 
     def queue(self, word: str) -> None:
-        """Queue an include word once per normalised spelling; stop past MAX_INCLUDE_WORDS distinct words."""
+        """Record each distinct spelling and queue the word once per normalised spelling; stop past
+        MAX_INCLUDE_WORDS distinct spellings or normalised words."""
+        if not self.stopped and word not in self.seen_spellings:
+            if len(self.seen_spellings) >= MAX_INCLUDE_WORDS:
+                self.stop(f"too many include words (limit {MAX_INCLUDE_WORDS})")
+                return
+            self.seen_spellings.add(word)
+            self.spellings.append(word)
         key = os.path.normpath(word)
         if self.stopped or key in self.words:
             return
@@ -244,7 +254,7 @@ def makefile_targets(makefile: Path) -> MakefileScan:
     scanner.pending.append((makefile, None))
     while scanner.pending and not scanner.stopped:
         scanner.visit(*scanner.pending.popleft())
-    return MakefileScan(frozenset(scanner.targets), tuple(scanner.problems))
+    return MakefileScan(frozenset(scanner.targets), tuple(scanner.problems), tuple(scanner.spellings))
 
 
 def _extra_makefiles(directory: Path) -> list[Violation]:
