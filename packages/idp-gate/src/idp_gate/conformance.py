@@ -23,6 +23,9 @@ OUTPUT_TAIL_LINES = 40
 EXAMPLE_FILE = "idp.yaml"
 # Inherited make state must not change the example's run (outer `make -n/-k/-j`, MAKEFILES).
 _MAKE_ENV_STRIPPED = frozenset({"MAKEFLAGS", "GNUMAKEFLAGS", "MAKELEVEL", "MFLAGS", "MAKEFILES"})
+# `$(IDP_PROFILE_DIR)/<rest>` include words are pinned as `<resolved profile dir>/<rest>` (make's command-line value).
+PROFILE_DIR_PREFIX = "$(IDP_PROFILE_DIR)/"
+_UNPINNABLE_CHARS = "$*?["  # a `<rest>` make would expand or glob cannot be pinned literally
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,24 @@ def _assume_old(words: tuple[str, ...]) -> list[str] | None:
             names.append(stripped)
     args = [f"--assume-old={n}" for n in dict.fromkeys(names)]
     return None if sum(len(a.encode("utf-8")) for a in args) > MAX_ASSUME_OLD_BYTES else args
+
+
+def _profile_names(words: tuple[str, ...], profile_dir: str) -> tuple[list[str], str | None]:
+    """Resolved paths for `$(IDP_PROFILE_DIR)/<rest>` words, in order, or `([], word)` for the first word that
+    cannot be pinned (another variable, a `$`/glob character in `<rest>`, or an empty `<rest>`)."""
+    names: list[str] = []
+    for word in words:
+        rest = word[len(PROFILE_DIR_PREFIX) :]
+        if not word.startswith(PROFILE_DIR_PREFIX) or not rest or any(c in rest for c in _UNPINNABLE_CHARS):
+            return [], word
+        names.append(f"{profile_dir}/{rest}")
+    return names, None
+
+
+def _shown(word: str) -> str:
+    """`repr(word)` truncated to contract.MAX_SHOWN_WORD characters (the word is untrusted and echoed)."""
+    text = repr(word)
+    return text if len(text) <= contract.MAX_SHOWN_WORD else text[: contract.MAX_SHOWN_WORD] + "…"
 
 
 def _invalid(directory: Path, violations: Sequence[contract.Violation]) -> Result:
@@ -138,7 +159,10 @@ def check_example(directory: Path, make: str, root: Path) -> Result:
         profile_dir = str(profiles.resolve(doc["spec"]["build"]["profile"])["dir"])
     except profiles.ProfileError as exc:
         return Result(directory, ok=False, reason="profile: " + "; ".join(exc.lines))
-    assume_old = _assume_old(scan.include_words)
+    names, unpinnable = _profile_names(scan.dynamic_include_words, profile_dir)
+    if unpinnable is not None:
+        return Result(directory, ok=False, reason=f"dynamic include {_shown(unpinnable)} cannot be pinned")
+    assume_old = _assume_old((*scan.include_words, *names))
     if assume_old is None:
         return Result(directory, ok=False, reason="include words exceed the make argument limit")
     return _run_make_verify(directory, make, profile_dir, assume_old)

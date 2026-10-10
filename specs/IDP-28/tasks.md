@@ -47,7 +47,7 @@ package tests green. Test names and exact expectations are in plan.md ("Tests").
   - Confirm that `test_makefile_scan_records_literal_include_words_as_written` and
     `test_makefile_scan_caps_recorded_include_spellings` stay green unchanged.
   - (AC-4) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py.
-- [ ] T6 Pin or reject dynamic includes in conformance.
+- [x] T6 Pin or reject dynamic includes in conformance.
   - Add `test_profile_dir_include_is_pinned_with_resolved_path`, `test_unpinnable_dynamic_include_fails_without_running_make`
     and `needs_make` `test_make_cannot_remake_profile_dir_include` (monkeypatched `profiles.resolve` to a `tmp_path`
     profile; never the real profile dir) (red).
