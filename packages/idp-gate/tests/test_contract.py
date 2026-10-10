@@ -969,3 +969,292 @@ def test_include_line_with_backslash_is_a_violation(
     assert exit_code == code
     # The words of an offending line are not queued, so they are not recorded (nor pinned) either.
     assert "gen\\#.mk" not in contract.makefile_targets(makefile).include_words
+
+
+# --- IDP-28 AC-1/AC-3: the scanner reads make's logical lines (backslash-newline joined before anything else) ------
+
+
+def _scan_text(tmp_path: Path, text: str) -> contract.MakefileScan:
+    """Scan a Makefile with exactly `text` (bytes as given: no newline translation)."""
+    makefile = tmp_path / "Makefile"
+    makefile.write_bytes(text.encode("utf-8"))
+    return contract.makefile_targets(makefile)
+
+
+@pytest.mark.ac("IDP-28:AC-1")
+@pytest.mark.parametrize(
+    ("text", "targets"),
+    [
+        ("a \\\nverify:\n", {"a", "verify"}),
+        ("X = \\\nverify:\n", set()),
+        ("lint: \\\\\nverify:\n", {"lint", "verify"}),
+        ("X = \\\r\nverify:\r\n", set()),
+        ("lint:\n\techo \\\nverify:\n", {"lint"}),
+        ("define D\nx \\\nendef\ninside:\nendef\nafter:\n", {"after"}),
+        ("verify:\nlint: \\", {"verify", "lint"}),
+        ("spec-trace: \\\n  KEY = x\n", set()),
+    ],
+    ids=[
+        "rule-continuation",
+        "assignment-continuation",
+        "even-backslashes",
+        "crlf-continuation",
+        "recipe-continuation",
+        "continued-endef-in-define",
+        "continuation-at-eof",
+        "target-specific-variable",
+    ],
+)
+def test_logical_lines_join_odd_trailing_backslashes(tmp_path: Path, text: str, targets: set[str]) -> None:
+    scan = _scan_text(tmp_path, text)
+
+    assert scan.targets == targets
+    assert scan.violations == ()
+
+
+@pytest.mark.ac("IDP-28:AC-1")
+def test_continuation_into_define_does_not_hide_later_lines(tmp_path: Path) -> None:
+    makefile = _write_makefile(tmp_path)
+    makefile.write_text(
+        makefile.read_text()
+        + "X = \\\n"
+        + "define Y\n"
+        + "-include gen.mk\n"
+        + "gen.mk:\n"
+        + "\techo 'EVIL := 1' > gen.mk\n"
+        + "define Z\n"
+        + "endef\n"
+        + "late:\n"
+    )
+
+    scan = contract.makefile_targets(makefile)
+
+    assert scan.include_words == ("gen.mk",)
+    assert {"gen.mk", "late"} <= scan.targets
+    assert scan.violations == ()
+
+
+@pytest.mark.ac("IDP-28:AC-1")
+def test_many_continued_lines_are_joined_in_linear_time(tmp_path: Path) -> None:
+    # 200 000 one-character continued lines: quadratic joining would take minutes; the scan must finish promptly.
+    scan = _scan_text(tmp_path, "a \\\n" * 200_000 + "lint:\nverify:\n")
+
+    assert scan.targets == {"a", "lint", "verify"}
+    assert scan.violations == ()
+
+
+@pytest.mark.ac("IDP-28:AC-3")
+def test_comment_ending_in_backslash_continues_onto_next_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    makefile = _write_makefile(tmp_path, tuple(t for t in ALL_TARGETS if t != "verify"))
+    makefile.write_text(makefile.read_text() + "# note \\\nverify:\n\t@true\n")
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate"])
+
+    assert capsys.readouterr().out == "idp.yaml: Makefile: missing required target 'verify'\n"
+    assert code == 1
+    assert _run(["validate", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["violations"] == [
+        {"path": "Makefile", "message": "missing required target 'verify'"}
+    ]
+
+
+@pytest.mark.ac("IDP-28:AC-3")
+@pytest.mark.parametrize(
+    ("text", "targets"),
+    [
+        ("lint: # note \\\nverify:\n", {"lint"}),
+        ("define D\n# note \\\nendef\ninside:\nendef\nafter:\n", {"after"}),
+    ],
+    ids=["trailing-comment", "comment-in-define-body"],
+)
+def test_trailing_comment_ending_in_backslash_hides_next_line(tmp_path: Path, text: str, targets: set[str]) -> None:
+    scan = _scan_text(tmp_path, text)
+
+    assert scan.targets == targets
+    assert scan.violations == ()
+
+
+# --- IDP-28 AC-2: line separators make does not use are violations; CRLF is accepted ------------------------------
+
+FOREIGN_SEPARATOR = "contains a line separator make does not use"
+
+
+@pytest.mark.ac("IDP-28:AC-2")
+@pytest.mark.parametrize(
+    ("separator", "what"),
+    [
+        ("\rx", "CR not followed by LF"),
+        ("\r\r\n", "CR not followed by LF"),
+        ("\x0b", "U+000B"),
+        ("\x0c", "U+000C"),
+        ("\x1c", "U+001C"),
+        ("\x1d", "U+001D"),
+        ("\x1e", "U+001E"),
+        ("\x85", "U+0085"),
+        ("\u2028", "U+2028"),
+        ("\u2029", "U+2029"),
+    ],
+    ids=["lone-cr", "cr-cr-lf", "vt", "ff", "fs", "gs", "rs", "nel", "line-separator", "paragraph-separator"],
+)
+def test_line_separator_make_does_not_use_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], separator: str, what: str
+) -> None:
+    _write_idp(tmp_path)
+    makefile = _write_makefile(tmp_path)
+    makefile.write_bytes((makefile.read_text() + f"extra:{separator}tail\n").encode("utf-8"))
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate"])
+
+    assert capsys.readouterr().out == (
+        f"idp.yaml: Makefile: 'Makefile' {FOREIGN_SEPARATOR} ({what}); use LF or CRLF line endings\n"
+    )
+    assert code == 1
+
+
+@pytest.mark.ac("IDP-28:AC-2")
+def test_line_separator_in_included_file_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_idp(tmp_path)
+    makefile = _write_makefile(tmp_path)
+    makefile.write_text(makefile.read_text() + "include bad.mk other.mk\n")
+    # bad.mk is not parsed (its include is not followed); other.mk is still scanned.
+    (tmp_path / "bad.mk").write_bytes("include /hidden.mk\nX = 1\x85define Y\n".encode())
+    (tmp_path / "other.mk").write_text("include /outside.mk\n")
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate", "--json"])
+
+    assert json.loads(capsys.readouterr().out)["violations"] == [
+        {"path": "Makefile", "message": f"'bad.mk' {FOREIGN_SEPARATOR} (U+0085); use LF or CRLF line endings"},
+        {"path": "Makefile", "message": "include '/outside.mk' is outside the service directory"},
+    ]
+    assert code == 1
+
+
+@pytest.mark.ac("IDP-28:AC-2")
+@pytest.mark.parametrize("mixed", [False, True], ids=["crlf", "mixed-lf-crlf"])
+def test_crlf_makefile_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mixed: bool
+) -> None:
+    _write_idp(tmp_path)
+    makefile = _write_makefile(tmp_path, tuple(t for t in ALL_TARGETS if t not in {"lint", "verify"}))
+    # `lint \` + `verify:` is one rule line naming both targets only if the CRLF continuation is joined.
+    lines = [*makefile.read_text().splitlines(), "-include gen.mk", "lint \\", "verify:", "\t@true"]
+    endings = ["\n" if mixed and i % 2 else "\r\n" for i in range(len(lines))]
+    makefile.write_bytes("".join(line + end for line, end in zip(lines, endings, strict=True)).encode("utf-8"))
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate"])
+
+    assert capsys.readouterr().out == "idp.yaml: valid (idp-service.v1.json)\n"
+    assert code == 0
+    assert contract.makefile_targets(makefile).include_words == ("gen.mk",)
+
+
+# --- IDP-28 AC-4: the scan records `$` include words (conformance pins or rejects them) ----------------------------
+
+
+@pytest.mark.ac("IDP-28:AC-4")
+def test_makefile_scan_records_dynamic_include_words(tmp_path: Path) -> None:
+    makefile = tmp_path / "Makefile"
+    makefile.write_text(
+        "include $(IDP_PROFILE_DIR)/defaults.mk common.mk\n"
+        "-include $(V)/d.mk a$$b.mk *.mk\n"  # `*.mk` (glob, no `$`) is in neither list
+        "include $(IDP_PROFILE_DIR)/defaults.mk\n"  # repeated spelling: recorded once
+        "lint:\n\t@true\n"
+    )
+    (tmp_path / "common.mk").write_text("sinclude $(V)/d.mk ${W}.mk\nverify:\n\t@true\n")
+
+    scan = contract.makefile_targets(makefile)
+
+    assert scan.dynamic_include_words == ("$(IDP_PROFILE_DIR)/defaults.mk", "$(V)/d.mk", "a$$b.mk", "${W}.mk")
+    assert scan.include_words == ("common.mk",)
+    assert scan.targets == {"lint", "verify"}
+    assert scan.violations == ()
+
+
+@pytest.mark.ac("IDP-28:AC-4")
+@pytest.mark.parametrize(
+    ("dynamic", "violations"),
+    [(24, ()), (25, (contract.Violation("Makefile", "too many include words (limit 1024)"),))],
+    ids=["at-limit", "over-limit"],
+)
+def test_dynamic_include_words_share_the_include_spelling_cap(
+    tmp_path: Path, dynamic: int, violations: tuple[contract.Violation, ...]
+) -> None:
+    literal = " ".join(f"missing{i}.mk" for i in range(1000))  # not on disk: recorded, never read
+    words = " ".join(f"$(V{i}).mk" for i in range(dynamic))
+    makefile = tmp_path / "Makefile"
+    makefile.write_text(f"-include {literal}\n-include {words}\nlint:\n\t@true\n")
+
+    scan = contract.makefile_targets(makefile)
+
+    assert scan.violations == violations
+    assert len(scan.include_words) == 1000
+    assert len(scan.dynamic_include_words) == 24
+
+
+@pytest.mark.ac("IDP-28:AC-4")
+def test_dynamic_words_on_backslash_include_lines_are_not_recorded(tmp_path: Path) -> None:
+    scan = _scan_text(tmp_path, "-include $(V)/x.mk \\\n  $(W)/y.mk\nsinclude $(V)/a\\ b.mk\nlint:\n")
+
+    assert scan.dynamic_include_words == ()
+    assert scan.violations == (
+        contract.Violation("Makefile", f"include line in 'Makefile' {BACKSLASH_INCLUDE}"),
+        contract.Violation("Makefile", f"include line in 'Makefile' {BACKSLASH_INCLUDE}"),
+    )
+
+
+# --- IDP-28 AC-5: load_service returns the scan it validated ------------------------------------------------------
+
+
+@pytest.mark.ac("IDP-28:AC-5")
+def test_load_service_returns_the_validated_scan(tmp_path: Path) -> None:
+    path = _write_idp(tmp_path)
+    makefile = _write_makefile(tmp_path)
+    makefile.write_text(makefile.read_text() + "-include gen.mk\ninclude $(V)/d.mk\n")
+
+    result = contract.load_service(path)
+
+    assert len(result) == 3
+    doc, violations, scan = result
+    assert doc == _doc_example()
+    assert violations == []
+    assert scan.targets == frozenset(ALL_TARGETS)
+    assert scan.include_words == ("gen.mk",)
+    assert scan.dynamic_include_words == ("$(V)/d.mk",)
+    assert contract.validate_service(path) == []
+
+
+@pytest.mark.ac("IDP-28:AC-5")
+@pytest.mark.parametrize(
+    ("idp_yaml", "paths"),
+    [
+        ("a: [unclosed\n", [""]),
+        ("- just\n- a list\n", [""]),
+        (None, ["Makefile"]),
+    ],
+    ids=["invalid-yaml", "non-mapping-yaml", "makefile-not-found"],
+)
+def test_load_service_returns_an_empty_scan_when_makefile_was_not_scanned(
+    tmp_path: Path, idp_yaml: str | None, paths: list[str]
+) -> None:
+    path = tmp_path / "idp.yaml"
+    if idp_yaml is None:  # a valid idp.yaml without a Makefile
+        _write_idp(tmp_path)
+    else:
+        path.write_text(idp_yaml)
+        _write_makefile(tmp_path)
+
+    result = contract.load_service(path)
+
+    assert len(result) == 3
+    _, violations, scan = result
+    assert [v.path for v in violations] == paths
+    assert scan == contract.MakefileScan(frozenset(), ())
