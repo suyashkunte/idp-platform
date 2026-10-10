@@ -58,6 +58,23 @@ Record for the PR description: the uv version, whether `uv.lock` changed and whe
 commits). Until H1 lands, `test_root_build_constraint_dependencies_pin_build_constraints_file` and
 `test_build_constraint_sources_agree` are red.
 
+### Amendment (2026-10-10, spec Q8): pin `editables` too (T5, then human task H2)
+T5 (agent, after the amended spec is re-approved):
+- `packages/idp-gate/pyproject.toml`: `[dependency-groups] dev = ["hatchling>=1.25", "editables~=0.3"]` (the same
+  requirement hatchling's editable hook adds).
+- `uv lock --offline` (fall back to `uv lock` only with the human's OK); expected diff: one new `[[package]] editables`
+  entry and the dev-group line, no other version change.
+- Regenerate `packages/idp-gate/build-constraints.txt` with the command in its header (`_REGENERATE_CONSTRAINTS`).
+- Drift reference = union of `_locked_closure("hatchling")` and `_locked_closure("editables")`; a test asserts that
+  `editables` is in the reference. Until H2 lands, the root list lacks `editables`, so the AC-1 root test and
+  `test_build_constraint_sources_agree` are red by design.
+- ADR-0012 and CHANGELOG: say the pinned closure is hatchling plus `editables`.
+
+H2 (human, protected path): add `"editables==<version T5 locked>",` to the root `build-constraint-dependencies` list
+(keep it sorted), update the comment to say "the hatchling and editables closures in uv.lock", then run
+`uv lock --offline || uv lock`, `uv lock --check`, `uv sync --all-packages --frozen --reinstall-package idp-gate` and
+commit `pyproject.toml` and `uv.lock` together.
+
 ### Drift check design (test code, stdlib only)
 uv.lock is the reference. Sketch (plain text, not code):
 

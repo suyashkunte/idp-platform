@@ -45,6 +45,12 @@ Facts checked in the repository (2026-10-08):
     `uv sync` in a test (NFR: no network, no extra builds). That uv applies the setting to the editable build is
     verified by AC-2 and by H1. ASSUMPTION A1, see Q1.
   - Red until the human edit H1 lands (the key does not exist today).
+  - AMENDMENT (2026-10-10, after review loop 1, decided by the human, see Q8): for an editable build, hatchling's
+    `get_requires_for_build_editable` always adds `editables~=0.3` to the build requirements. So "hatchling and its
+    dependencies" for the `uv sync` build means the hatchling closure plus the `editables` closure. `editables` is
+    added to idp-gate's dev group so `uv.lock` locks it, `build-constraints.txt` is regenerated to include it, the root
+    list gains `editables==<locked>` (human task H2), and the drift reference becomes the union of both closures
+    (task T5). The AC text above is unchanged.
 - **AC-2** Given CI has run `uv sync --all-packages --frozen`, when the tests read the installed idp-gate's `dist-info/WHEEL`, then `Generator` names the hatchling version locked in `uv.lock`.
   - "The hatchling version locked in uv.lock" = the `version` of the single `[[package]]` entry named `hatchling` in
     `uv.lock` (today `1.32.4`; present because of idp-gate's dev group). The AC-3 drift test ties it to
@@ -170,6 +176,11 @@ Facts checked in the repository (2026-10-08):
   change (only the constraint record may be added). Confirm.
 - Q7: Should the root list carry a comment pointing at `build-constraints.txt` and the drift test? Proposed: yes, a
   one-line comment above the key (included in the H1 snippet). Comments are not parsed by the test.
+- Q8 (DECIDED 2026-10-10 by the human: fix in this PR): the security review found that the editable build also
+  installs `editables` (hatchling `build.py`, `get_requires_for_build_editable` returns
+  `[*builder.config.dependencies, EDITABLES_REQUIREMENT]` with `editables~=0.3`), which was in none of the three
+  sources. Pin it as described in the AC-1 amendment (tasks T5 and H2). The non-editable `uv build` runs from IDP-24
+  do not request it; an extra hashed entry in `build-constraints.txt` is harmless for them.
 
 ## Traceability
 | AC | Planned tests |
