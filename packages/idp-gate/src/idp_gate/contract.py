@@ -293,15 +293,22 @@ def _enabled_test_kinds(doc: Any) -> list[str]:
     return [k for k in TEST_KINDS if tests.get(k) is True]
 
 
-def validate_service(path: Path) -> list[Violation]:
-    """Schema violations for `path`, then Make contract violations (skipped if the YAML is not a mapping)."""
+def load_service(path: Path) -> tuple[Any, list[Violation]]:
+    """Parsed `idp.yaml` and its violations: schema, then Make contract (skipped if the YAML is not a mapping).
+
+    On invalid YAML the document is None and the only violation is the parse error."""
     doc, errors = _load_yaml(path)
     if errors:
-        return errors
+        return None, errors
     violations = validate_document(doc)
     if isinstance(doc, dict):
         violations += check_make_contract(doc, path.parent / MAKE_PATH)
-    return violations
+    return doc, violations
+
+
+def validate_service(path: Path) -> list[Violation]:
+    """Schema violations for `path`, then Make contract violations (skipped if the YAML is not a mapping)."""
+    return load_service(path)[1]
 
 
 def to_dict(file: str, violations: list[Violation]) -> dict[str, object]:

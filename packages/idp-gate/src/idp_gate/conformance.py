@@ -80,11 +80,10 @@ def _run_make_verify(directory: Path, make: str, profile_dir: str) -> Result:
 def check_example(directory: Path, make: str) -> Result:
     """Validate the contract, resolve the build profile, then run `make verify`; the first failing step decides."""
     path = directory / EXAMPLE_FILE
-    violations = contract.validate_service(path)
+    doc, violations = contract.load_service(path)
     if violations:
         reason = f"idp validate: {len(violations)} violation(s)"
         return Result(directory, ok=False, reason=reason, details=tuple(str(v) for v in violations))
-    doc, _ = contract._load_yaml(path)
     try:
         profile_dir = str(profiles.resolve(doc["spec"]["build"]["profile"])["dir"])
     except profiles.ProfileError as exc:
