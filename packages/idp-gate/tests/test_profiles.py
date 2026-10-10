@@ -1197,6 +1197,18 @@ def _parse_constraints(text: str) -> tuple[_Pins, list[str]]:
     return pins, problems
 
 
+# hatchling's get_requires_for_build_editable adds `editables~=0.3`, so the editable build needs both (IDP-25 Q8)
+_BUILD_BACKEND_ROOTS = ("hatchling", "editables")
+
+
+def _build_backend_closure() -> _Pins:
+    """The pins every idp-gate build may install: the union of the uv.lock closures of `_BUILD_BACKEND_ROOTS`."""
+    closure: _Pins = {}
+    for root in _BUILD_BACKEND_ROOTS:
+        closure |= _locked_closure(root)
+    return closure
+
+
 def _constraints() -> _Pins:
     """`{name: (version, {"sha256:..."})}` parsed from build-constraints.txt (continuations joined, markers ignored)."""
     pins, problems = _parse_constraints(BUILD_CONSTRAINTS.read_text())
@@ -1219,7 +1231,7 @@ def test_build_constraints_pin_locked_build_backend_with_hashes() -> None:
     assert BUILD_CONSTRAINTS.is_file(), (
         f"packages/idp-gate/build-constraints.txt is missing (IDP-24 AC-1); generate it with: {_REGENERATE_CONSTRAINTS}"
     )
-    locked = _locked_closure()
+    locked = _build_backend_closure()
     assert "hatchling" in locked
     assert all(hashes for _, hashes in locked.values())
     drift = f"build-constraints.txt drifted from uv.lock; regenerate: {_REGENERATE_CONSTRAINTS}"
@@ -1723,7 +1735,12 @@ def test_root_build_constraint_dependencies_pin_build_constraints_file() -> None
     pins, problems = _parse_exact_pins(root_entries, "root pyproject.toml")
     assert problems == [], "; ".join(problems)
     assert "hatchling" in pins
-    assert pins == {name: version for name, (version, _) in _constraints().items()}
+    expected = {name: version for name, (version, _) in _constraints().items()}
+    assert pins == expected, (
+        f"root build-constraint-dependencies differs from build-constraints.txt "
+        f"({'; '.join(_compare(expected, pins))}); "
+        f"a human must set it to: {sorted(f'{name}=={version}' for name, version in expected.items())}"
+    )
 
 
 @pytest.mark.ac("IDP-25:AC-1")
@@ -1731,8 +1748,19 @@ def test_root_build_constraint_dependencies_pin_build_constraints_file() -> None
 def test_build_constraint_sources_agree() -> None:
     root_entries = _root_build_constraints(_ROOT_PYPROJECT.read_text())
     lock_recorded = tomllib.loads(UV_LOCK.read_text()).get("manifest", {}).get("build-constraints", [])
-    problems = _build_constraint_drift(_locked_closure(), BUILD_CONSTRAINTS.read_text(), root_entries, lock_recorded)
+    problems = _build_constraint_drift(
+        _build_backend_closure(), BUILD_CONSTRAINTS.read_text(), root_entries, lock_recorded
+    )
     assert problems == [], "\n".join(problems)
+
+
+@pytest.mark.ac("IDP-25:AC-1")
+@pytest.mark.ac("IDP-25:AC-3")
+def test_build_constraint_reference_includes_editables() -> None:
+    reference = _build_backend_closure()
+    assert "editables" in reference, "the editable build also installs editables~=0.3 (spec Q8); lock it in uv.lock"
+    assert "hatchling" in reference
+    assert reference == _locked_closure("hatchling") | _locked_closure("editables")
 
 
 @pytest.mark.ac("IDP-25:AC-2")
