@@ -313,6 +313,8 @@ def load_service(path: Path) -> tuple[Any, list[Violation]]:
         return None, [Violation("", f"cannot read: not valid UTF-8 ({exc.reason} at byte {exc.start})")]
     except OSError as exc:
         return None, [Violation("", f"cannot read: {exc.strerror or exc}")]
+    except RecursionError:  # the YAML parser recurses per nesting level
+        return None, [Violation("", "cannot parse: nesting too deep")]
     if errors:
         return None, errors
     violations = validate_document(doc)
