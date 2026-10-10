@@ -6,6 +6,16 @@ requires-python = ">=3.12"
 
 [tool.uv]
 package = false
+# Build backend for every uv sync build of idp-gate (IDP-25, ADR-0012). Must equal
+# packages/idp-gate/build-constraints.txt and the hatchling closure in uv.lock (drift test in test_profiles.py).
+build-constraint-dependencies = [
+  "hatchling==1.32.4",
+  "packaging==26.3",
+  "pathspec==1.1.1",
+  "pluggy==1.6.0",
+  "tomlkit==0.15.1",
+  "trove-classifiers==2026.9.21.13",
+]
 
 [tool.uv.workspace]
 members = ["packages/*"]
