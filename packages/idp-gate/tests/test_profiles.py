@@ -1286,12 +1286,12 @@ _ROOT_PYPROJECT = REPO / "pyproject.toml"
 _ADR_0012 = REPO / "docs" / "adr" / "0012-build-profiles.md"
 
 
-def _idp25_helper(name: str) -> Any:
-    """Look up an IDP-25 drift helper (plan.md, T1/T2) so each test fails on its own while it does not exist yet."""
-    helper = globals().get(name)
-    if helper is None:
-        pytest.fail(f"{name} is missing (IDP-25 T1/T2 drift helpers not implemented)")
-    return helper
+def _root_build_constraints(pyproject_text: str) -> object | None:
+    """The root `[tool.uv] build-constraint-dependencies` value as written (None if the key is absent)."""
+    value: object | None = (
+        tomllib.loads(pyproject_text).get("tool", {}).get("uv", {}).get("build-constraint-dependencies")
+    )
+    return value
 
 
 _FILE_STALE = "packages/idp-gate/build-constraints.txt is out of date with uv.lock"
@@ -1636,7 +1636,7 @@ _DRIFT_CASES = {
 @pytest.mark.ac("IDP-25:AC-3")
 @pytest.mark.parametrize("case", list(_DRIFT_CASES.values()), ids=list(_DRIFT_CASES))
 def test_build_constraint_drift_names_stale_source_and_remedy(case: _DriftCase) -> None:
-    drift = _idp25_helper("_build_constraint_drift")
+    drift = _build_constraint_drift
     problems = drift(case.locked, case.constraints_text, case.root_entries, case.lock_recorded)
     assert isinstance(problems, list)
     if not case.expected:
@@ -1649,11 +1649,11 @@ def test_build_constraint_drift_names_stale_source_and_remedy(case: _DriftCase) 
 
 @pytest.mark.ac("IDP-25:AC-1")
 def test_root_build_constraint_dependencies_pin_build_constraints_file() -> None:
-    root_entries = _idp25_helper("_root_build_constraints")(_ROOT_PYPROJECT.read_text())
+    root_entries = _root_build_constraints(_ROOT_PYPROJECT.read_text())
     assert isinstance(root_entries, list), (
         "root pyproject.toml has no [tool.uv] build-constraint-dependencies list (IDP-25 AC-1, human edit H1)"
     )
-    pins, problems = _idp25_helper("_parse_exact_pins")(root_entries, "root pyproject.toml")
+    pins, problems = _parse_exact_pins(root_entries, "root pyproject.toml")
     assert problems == []
     assert len(root_entries) == len(pins), f"duplicate entries in build-constraint-dependencies: {root_entries}"
     assert "hatchling" in pins
@@ -1663,9 +1663,9 @@ def test_root_build_constraint_dependencies_pin_build_constraints_file() -> None
 @pytest.mark.ac("IDP-25:AC-1")
 @pytest.mark.ac("IDP-25:AC-3")
 def test_build_constraint_sources_agree() -> None:
-    root_entries = _idp25_helper("_root_build_constraints")(_ROOT_PYPROJECT.read_text())
+    root_entries = _root_build_constraints(_ROOT_PYPROJECT.read_text())
     lock_recorded = tomllib.loads(UV_LOCK.read_text()).get("manifest", {}).get("build-constraints")
-    drift = _idp25_helper("_build_constraint_drift")
+    drift = _build_constraint_drift
     problems = drift(_locked_closure(), BUILD_CONSTRAINTS.read_text(), root_entries, lock_recorded)
     assert problems == [], "\n".join(problems)
 
