@@ -836,7 +836,7 @@ def test_makefile_scan_records_literal_include_words_as_written(tmp_path: Path) 
 
     scan = contract.makefile_targets(makefile)
 
-    assert getattr(scan, "include_words", None) == ("common.mk", "./common.mk", "gen.mk", "sub/x.mk")
+    assert scan.include_words == ("common.mk", "./common.mk", "gen.mk", "sub/x.mk")
     assert scan.targets == {"lint", "verify", "test"}
     assert scan.violations == ()
 
@@ -859,7 +859,7 @@ def test_makefile_scan_caps_recorded_include_spellings(
     scan = contract.makefile_targets(makefile)
 
     assert scan.violations == violations
-    assert len(getattr(scan, "include_words", ())) == 1024
+    assert len(scan.include_words) == 1024
 
 
 # --- IDP-22 AC-6: an idp.yaml that cannot be read or decoded is a violation, not a traceback ----------------------
@@ -871,8 +871,9 @@ def test_makefile_scan_caps_recorded_include_spellings(
     [
         ("not-utf8", "cannot read: not valid UTF-8 (invalid continuation byte at byte 9)"),
         ("permission", "cannot read: Permission denied"),
+        ("no-strerror", "cannot read: boom"),
     ],
-    ids=["undecodable", "unreadable"],
+    ids=["undecodable", "unreadable", "oserror-no-strerror"],
 )
 def test_unreadable_or_undecodable_idp_yaml_is_a_violation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], kind: str, message: str
@@ -882,11 +883,12 @@ def test_unreadable_or_undecodable_idp_yaml_is_a_violation(
         (tmp_path / "idp.yaml").write_bytes(b"name: caf\xe9\n")
     else:
         _write_idp(tmp_path)
+        error = PermissionError(13, "Permission denied", "idp.yaml") if kind == "permission" else OSError("boom")
 
-        def denied(path: Path) -> tuple[Any, list[contract.Violation]]:
-            raise PermissionError(13, "Permission denied", str(path))
+        def failing(path: Path) -> tuple[Any, list[contract.Violation]]:
+            raise error
 
-        monkeypatch.setattr(contract, "_load_yaml", denied)
+        monkeypatch.setattr(contract, "_load_yaml", failing)
     monkeypatch.chdir(tmp_path)
 
     code = _run(["validate"])
@@ -895,3 +897,75 @@ def test_unreadable_or_undecodable_idp_yaml_is_a_violation(
     assert code == 1
     assert _run(["validate", "--json"]) == 1
     assert json.loads(capsys.readouterr().out)["violations"] == [{"path": "", "message": message}]
+
+
+@pytest.mark.ac("IDP-22:AC-6")
+def test_deeply_nested_idp_yaml_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_makefile(tmp_path)
+    (tmp_path / "idp.yaml").write_text("[" * 100000)  # the parser stops at the recursion limit, not at the end
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["validate"])
+
+    assert capsys.readouterr().out == "idp.yaml: <root>: cannot parse: nesting too deep\n"
+    assert code == 1
+    assert _run(["validate", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["violations"] == [
+        {"path": "", "message": "cannot parse: nesting too deep"}
+    ]
+
+
+# --- IDP-22 AC-7: include lines with a backslash (continuation or escape) are violations -------------------------
+
+BACKSLASH_INCLUDE = "uses a backslash (continuation or escape); write each include word literally on one line"
+
+
+@pytest.mark.ac("IDP-22:AC-7")
+@pytest.mark.parametrize(
+    ("extra", "common", "out", "code"),
+    [
+        (
+            "-include common.mk \\\n  gen.mk\n",
+            "COMMON := 1\n",
+            f"idp.yaml: Makefile: include line in 'Makefile' {BACKSLASH_INCLUDE}\n",
+            1,
+        ),
+        (
+            "-include gen\\#.mk\n",
+            "COMMON := 1\n",
+            f"idp.yaml: Makefile: include line in 'Makefile' {BACKSLASH_INCLUDE}\n",
+            1,
+        ),
+        (
+            "include common.mk\n",
+            "sinclude x\\ y.mk\n",
+            f"idp.yaml: Makefile: include line in 'common.mk' {BACKSLASH_INCLUDE}\n",
+            1,
+        ),
+        ("include common.mk # see notes \\\n", "COMMON := 1\n", "idp.yaml: valid (idp-service.v1.json)\n", 0),
+    ],
+    ids=["continuation", "escape", "in-include", "comment-only"],
+)
+def test_include_line_with_backslash_is_a_violation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: str,
+    common: str,
+    out: str,
+    code: int,
+) -> None:
+    _write_idp(tmp_path)
+    makefile = _write_makefile(tmp_path)
+    makefile.write_text(makefile.read_text() + extra)
+    (tmp_path / "common.mk").write_text(common)
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = _run(["validate"])
+
+    assert capsys.readouterr().out == out
+    assert exit_code == code
+    # The words of an offending line are not queued, so they are not recorded (nor pinned) either.
+    assert "gen\\#.mk" not in contract.makefile_targets(makefile).include_words

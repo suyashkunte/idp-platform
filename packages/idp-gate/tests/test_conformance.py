@@ -655,7 +655,7 @@ def test_conformance_fails_when_include_words_exceed_make_argument_limit(
     (bulky / "common.mk").write_text("COMMON := 1\n")
     _write_example(tmp_path / "examples", "plain")
     # 40 bytes: `--assume-old=Makefile` (21) fits, plus `--assume-old=common.mk` (22) does not.
-    monkeypatch.setattr(conformance, "MAX_ASSUME_OLD_BYTES", 40, raising=False)
+    monkeypatch.setattr(conformance, "MAX_ASSUME_OLD_BYTES", 40)
     _fake_make_on_path(tmp_path, monkeypatch)
     calls = _recording_popen(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -759,12 +759,20 @@ def test_make_cannot_remake_validated_makefiles(
 
 
 @pytest.mark.ac("IDP-22:AC-6")
+@pytest.mark.parametrize(
+    ("content", "detail"),
+    [
+        (b"name: caf\xe9\n", "<root>: cannot read: not valid UTF-8 (invalid continuation byte at byte 9)"),
+        (b"[" * 100000, "<root>: cannot parse: nesting too deep"),
+    ],
+    ids=["undecodable", "too-deep"],
+)
 def test_conformance_reports_unreadable_idp_yaml_and_continues(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], content: bytes, detail: str
 ) -> None:
     conformance = _conformance()
     alpha = _write_example(tmp_path / "examples", "alpha")
-    (alpha / "idp.yaml").write_bytes(b"name: caf\xe9\n")
+    (alpha / "idp.yaml").write_bytes(content)
     _write_example(tmp_path / "examples", "bravo")
     ran: list[str] = []
 
@@ -781,10 +789,51 @@ def test_conformance_reports_unreadable_idp_yaml_and_continues(
     out, err = capsys.readouterr()
     assert out == (
         "FAIL examples/alpha: idp validate: 1 violation(s)\n"
-        "    <root>: cannot read: not valid UTF-8 (invalid continuation byte at byte 9)\n"
+        f"    {detail}\n"
         "PASS examples/bravo\n"
         "conformance: 1 passed, 1 failed\n"
     )
     assert err == ""
     assert code == 1
     assert ran == ["examples/bravo"]
+
+
+# --- IDP-22 AC-7: backslash include lines (reviewer reproductions MJ1, MJ2) fail validation; make never runs -------
+
+GENERATE_EVIL = "\techo '$$(shell touch evil-ran)' > "
+
+
+@needs_make
+@pytest.mark.ac("IDP-22:AC-7")
+@pytest.mark.parametrize(
+    ("name", "rules"),
+    [
+        # MJ1: make unescapes the word to `gen#.mk`; the pinned spelling would be `gen\#.mk`.
+        ("mj1-escape", f"-include gen\\#.mk\ngen\\#.mk:\n{GENERATE_EVIL}'gen#.mk'\n"),
+        # MJ2: make joins the continuation, so it also includes (and could generate) `gen.mk`.
+        ("mj2-continuation", f"-include common.mk \\\n  gen.mk\ngen.mk:\n{GENERATE_EVIL}gen.mk\n"),
+    ],
+    ids=["mj1-escape", "mj2-continuation"],
+)
+def test_conformance_rejects_backslash_include_lines_without_running_make(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], name: str, rules: str
+) -> None:
+    directory = _write_example(tmp_path / "examples", name, verify="@touch validated-ran")
+    _append_to_makefile(directory, rules)
+    (directory / "common.mk").write_text("COMMON := 1\n")
+    for file_name in ("Makefile", "common.mk"):
+        os.utime(directory / file_name, (OLD_MTIME, OLD_MTIME))
+    for var in STRIPPED_MAKE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        f"FAIL examples/{name}: idp validate: 1 violation(s)\n"
+        "    Makefile: include line in 'Makefile' uses a backslash (continuation or escape);"
+        " write each include word literally on one line\n"
+        "conformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert sorted(p.name for p in directory.iterdir()) == ["Makefile", "common.mk", "idp.yaml"]
