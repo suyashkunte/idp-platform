@@ -1,4 +1,7 @@
-"""Conformance runner (IDP-19): `idp validate` and `make verify` for every example directory with an `idp.yaml`."""
+"""Conformance runner (IDP-19): `idp validate` and `make verify` for every example directory with an `idp.yaml`.
+
+IDP-22: an example that is a symlink or resolves outside the examples directory fails before anything runs, and
+`make verify` reads only the validated Makefile (`-f Makefile`)."""
 
 from __future__ import annotations
 
@@ -87,8 +90,21 @@ def _run_make_verify(directory: Path, make: str, profile_dir: str) -> Result:
     return Result(directory, ok=True)
 
 
-def check_example(directory: Path, make: str) -> Result:
-    """Validate the contract, resolve the build profile, then run `make verify`; the first failing step decides."""
+def _outside(directory: Path, root: Path) -> bool:
+    """True if `directory` is a symlink or its real path is not under `root`'s; fails closed if resolution fails."""
+    if directory.is_symlink():
+        return True
+    try:
+        return not directory.resolve(strict=True).is_relative_to(root.resolve(strict=True))
+    except (OSError, RuntimeError):
+        return True
+
+
+def check_example(directory: Path, make: str, root: Path) -> Result:
+    """Check `directory` is confined to `root`, validate the contract, resolve the build profile, then run
+    `make verify`; the first failing step decides."""
+    if _outside(directory, root):
+        return Result(directory, ok=False, reason="outside examples directory")
     path = directory / EXAMPLE_FILE
     doc, violations = contract.load_service(path)
     if violations:
