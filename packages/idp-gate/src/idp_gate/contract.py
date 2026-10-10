@@ -119,8 +119,7 @@ def _rule_end(line: str) -> int | None:
 
 def _rule_names(line: str) -> set[str]:
     """Target names defined by a rule line (column 0); special, pattern, `$(...)` names and
-    target-specific variable lines (`name: VAR = x`) are dropped."""
-    line = line.replace("\\\n", " ")  # make collapses backslash-newline to one space outside recipes
+    target-specific variable lines (`name: VAR = x`) are dropped. `line` is already collapsed (`_collapse`)."""
     end = _rule_end(line)
     if end is None or _TARGET_VARIABLE.match(line, end):
         return set()
@@ -144,18 +143,43 @@ def _logical_lines(text: str) -> list[str]:
     return lines
 
 
-def _parsed_lines(text: str) -> list[str]:
-    """Logical lines with comments (unescaped `#`) removed and `define ... endef` bodies (nested) skipped."""
-    lines: list[str] = []
+def _collapse(raw: str) -> str:
+    """make's `collapse_continuations` on one logical line: each `\\`+newline becomes one space (blanks around it
+    dropped; with an even run of backslashes before it, half are kept and blanks before it stay). Linear."""
+    if "\n" not in raw:
+        return raw
+    *joined, last = raw.split("\n")
+    parts: list[str] = []
+    for index, part in enumerate(joined):
+        n = len(part) - len(part.rstrip("\\"))
+        kept = part[:-n] + "\\" * (n // 2)
+        kept = kept if n // 2 else kept.rstrip(" \t")
+        parts.append(kept if index == 0 else kept.lstrip(" \t"))
+    parts.append(last.lstrip(" \t"))
+    return " ".join(parts)
+
+
+@dataclass(frozen=True)
+class _Line:
+    """One parsed logical line: `code` is collapsed and comment-stripped; `raw_code` is comment-stripped but not
+    collapsed (only for the IDP-22 AC-7 backslash check on include lines)."""
+
+    code: str
+    raw_code: str
+
+
+def _parsed_lines(text: str) -> list[_Line]:
+    """Collapsed logical lines with comments (unescaped `#`) removed and `define ... endef` bodies (nested) skipped."""
+    lines: list[_Line] = []
     depth = 0
     for raw in _logical_lines(text):
-        line = _COMMENT.split(raw, maxsplit=1)[0]
+        code = _COMMENT.split(_collapse(raw), maxsplit=1)[0]
         if depth:
-            depth += 1 if _DEFINE_START.match(line) else -1 if _DEFINE_END.match(line) else 0
-        elif not line.startswith("\t") and _DEFINE_START.match(line):
+            depth += 1 if _DEFINE_START.match(code) else -1 if _DEFINE_END.match(code) else 0
+        elif not code.startswith("\t") and _DEFINE_START.match(code):
             depth = 1
         else:
-            lines.append(line)
+            lines.append(_Line(code, _COMMENT.split(raw, maxsplit=1)[0]))
     return lines
 
 
@@ -218,7 +242,7 @@ def _locate(path: Path, word: str | None, root: Path) -> Path | Violation | None
     return resolved if resolved.is_relative_to(root) else _outside(word)
 
 
-def _load_makefile(resolved: Path, name: str) -> list[str] | Violation:
+def _load_makefile(resolved: Path, name: str) -> list[_Line] | Violation:
     """Parsed lines of a confined regular file, or a Violation (not a regular file, unreadable, too large, or using a
     line separator make does not use)."""
     if not resolved.is_file():  # directories, FIFOs, devices: never opened
@@ -305,13 +329,13 @@ class _Scanner:
             self.problem(lines)
             return
         for line in lines:
-            self.targets |= _rule_names(line)
-            if _is_include_line(line) and "\\" in line:  # make would read other words than the scan sees
+            self.targets |= _rule_names(line.code)
+            if _is_include_line(line.code) and "\\" in line.raw_code:  # make would read other words than the scan sees
                 self.problem(_backslash_include(word or MAKE_PATH))
                 continue
-            for dynamic in _dynamic_include_words(line):
+            for dynamic in _dynamic_include_words(line.code):
                 self.record_dynamic(dynamic)
-            for included in _include_words(line):
+            for included in _include_words(line.code):
                 self.queue(included)
 
 

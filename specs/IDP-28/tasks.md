@@ -97,7 +97,7 @@ T14.
   - If (a), (b), (c) or (h) differs, stop and revise the spec. Record (e) and (g) for the human (they change only
     docs wording). Optional: repeat on a 4.x if one is available.
   - (AC-6, AC-8, AC-10, AC-12, AC-13) Files: none.
-- [ ] T9 Collapse continuations before directives.
+- [x] T9 Collapse continuations before directives.
   - Add `test_continuations_are_collapsed_before_directives`, `test_continued_include_directive_is_a_backslash_violation`,
     `test_override_continued_into_define_hides_its_body` and the collapsing case in
     `test_many_continued_lines_are_joined_in_linear_time` (red).
