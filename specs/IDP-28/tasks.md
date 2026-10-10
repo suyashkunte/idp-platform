@@ -129,7 +129,7 @@ T14.
     new test. Confirm `test_variable_named_define_does_not_start_a_define_block` stays green unchanged.
   - (AC-12) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
     packages/idp-gate/tests/test_conformance.py.
-- [ ] T12 Characters make reads differently (incl. NUL).
+- [x] T12 Characters make reads differently (incl. NUL).
   - Add `test_character_make_reads_differently_is_a_violation` (parameters computed from `str.isspace()` plus the
     C0 controls), `test_spaces_tabs_and_crlf_are_accepted` (red), and `needs_make`
     `test_conformance_rejects_characters_make_reads_differently_without_running_make` (`a.mk\x1fb.mk`, U+00A0,

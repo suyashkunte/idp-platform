@@ -32,9 +32,12 @@ _DEFINE_LINE = re.compile(
     r"[ \t]*((?:(?:override|export|unexport|private)[ \t]+)*)define(?:[ \t]|$)(?![ \t]*(?::{1,3}|[+?!])?=)"
 )
 _COMMENT = re.compile(r"(?<!\\)#")  # `\#` is a literal hash, not a comment
-# Characters Python may split lines on but make does not (make splits on LF only and drops CR before LF).
-# One character class plus a one-character lookahead: never backtracks.
+# Line separators make does not use (make splits on LF only and drops a CR before LF), rejected so that no line
+# boundary is ambiguous. One character class plus a one-character lookahead: never backtracks.
 _FOREIGN_SEPARATOR = re.compile("\r(?!\n)|[\x0b\x0c\x1c-\x1e\x85\u2028\u2029]")
+# Characters make reads differently from Python (checked after _FOREIGN_SEPARATOR): every `str.isspace()` character
+# except space, tab, LF, CR and the separators above, plus the C0 controls (incl. NUL). One character class: linear.
+_FOREIGN_CHARACTER = re.compile("[\x00-\x08\x0e-\x1b\x1f\xa0\u1680\u2000-\u200a\u202f\u205f\u3000]")
 # Tenant repos are untrusted (CI runs this on PRs): cap what a Makefile and its includes can make us read or report.
 MAX_MAKEFILE_BYTES = 1024 * 1024
 MAX_MAKEFILES = 64
@@ -259,6 +262,14 @@ def _modifier_define(name: str) -> Violation:
     )
 
 
+def _foreign_character(name: str, match: re.Match[str]) -> Violation:
+    return Violation(
+        MAKE_PATH,
+        f"{_shown(name)} contains a control or space character make reads differently (U+{ord(match.group()):04X});"
+        " use only spaces, tabs and LF or CRLF line endings",
+    )
+
+
 def _foreign_separator(name: str, match: re.Match[str]) -> Violation:
     char = match.group()
     what = "CR not followed by LF" if char == "\r" else f"U+{ord(char):04X}"
@@ -300,6 +311,8 @@ def _load_makefile(resolved: Path, name: str) -> tuple[list[_Line], list[Violati
         return Violation(MAKE_PATH, f"{_shown(name)} exceeds 1 MiB")
     if match := _FOREIGN_SEPARATOR.search(text):
         return _foreign_separator(name, match)
+    if match := _FOREIGN_CHARACTER.search(text):
+        return _foreign_character(name, match)
     lines, problems = _parsed_lines(text)
     return lines, [_ambiguous_define_line(name) if p == "ambiguous" else _modifier_define(name) for p in problems]
 
