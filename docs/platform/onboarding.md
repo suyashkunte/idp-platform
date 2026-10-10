@@ -28,6 +28,9 @@ conformance fixture, not a template: start new applications from the templates a
 `make conformance` at the platform root runs `idp conformance examples`: for every `examples/*/` with an `idp.yaml` it
 runs `idp validate`, resolves the build profile and runs `make verify` (with `IDP_PROFILE_DIR` set to the resolved
 profile directory), printing one `PASS`/`FAIL` line per example and a summary; it exits non-zero if any example fails.
+It runs make as `make -C <dir> -f Makefile verify`, so it reads only the validated `Makefile`. An example entry that is a
+symlink, or whose real path resolves outside DIR, is reported `FAIL examples/<x>: outside examples directory` without
+running `idp validate` or make.
 `make verify` includes `make conformance`, so platform CI catches platform changes that would break tenants.
 
 ## Readiness checklist (design doc Appendix B.3, adapted)

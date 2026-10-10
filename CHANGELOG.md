@@ -45,3 +45,7 @@ versions follow [Semantic Versioning](https://semver.org/).
   (the editable build's extra requirement) via `[tool.uv] build-constraint-dependencies` (versions pinned, not
   hashes); a drift test keeps uv.lock (closures and its build-constraints record), build-constraints.txt and the root
   list in step.
+- IDP-22: `idp validate` reports a `GNUmakefile`/`makefile` (any case) beside `Makefile` as a violation (GNU make
+  would read it instead of the validated Makefile) and fails closed with `Makefile: cannot list the service directory`;
+  `idp conformance` runs `make -f Makefile verify`, fails symlinked or out-of-DIR example entries
+  (`outside examples directory`) without running make, and parses `idp.yaml` once.

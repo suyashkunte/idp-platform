@@ -71,13 +71,21 @@ spec:
 
 ### How `idp validate` checks it
 - `idp validate` with no argument validates `./idp.yaml`; `idp validate path/to/file.yaml` validates that file. The
-  Makefile checked is always `Makefile` in the same directory as the validated file (`makefile` and `GNUmakefile` are not
-  recognised).
-- Checks, in this order: the `idp-service.v1` schema, then the Make contract: every target marked "yes" above
-  (`lint`, `test`, `test-component`, `verify`, `spec-trace`), then `test-<kind>` for each of `smoke`, `api`, `e2e`,
-  `perf` whose `spec.tests.<kind>` is `true`. Recommended targets (`verify-fast`, `format`) are not checked. Every missing
-  target is reported, not only the first. A missing Makefile is reported as a single `Makefile not found` violation.
-  Make checks also run when the schema check fails, but are skipped if the YAML cannot be parsed into a mapping.
+  Makefile checked is always `Makefile` in the same directory as the validated file.
+- **Shadowing makefiles.** GNU make reads `GNUmakefile` and `makefile` before `Makefile`, so such a file would run
+  instead of the validated one. When `Makefile` exists, every other entry in the service directory whose name,
+  casefolded, is `gnumakefile` or `makefile` (e.g. `GNUmakefile`, `makefile`, `gnumakefile`, also a directory) is
+  reported: one violation per entry, sorted by stored name, with `path` = the entry name and the message
+  `GNU make reads this file before Makefile, but only Makefile is validated; remove or rename it`. Only the exact name
+  `Makefile` is exempt; names such as `Makefile.bak` or `common.mk` are not matched. If the directory cannot be listed,
+  the check fails closed with `Makefile: cannot list the service directory`. Remedy: move the content into `Makefile`
+  and delete or rename the other file.
+- Checks, in this order: the `idp-service.v1` schema, then the Make contract: a missing Makefile is reported as a
+  single `Makefile not found` violation (nothing else is checked); otherwise shadowing makefiles (above) first, then
+  every target marked "yes" above (`lint`, `test`, `test-component`, `verify`, `spec-trace`), then `test-<kind>` for
+  each of `smoke`, `api`, `e2e`, `perf` whose `spec.tests.<kind>` is `true`. Recommended targets (`verify-fast`,
+  `format`) are not checked. Every missing target is reported, not only the first. Make checks also run when the schema
+  check fails, but are skipped if the YAML cannot be parsed into a mapping.
 - Targets are found by **static parsing**; `make` is never executed. A target counts when a line at column 0 names it
   before `:` or `::` (not `:=`, `::=`, `:::=`); comments after an unescaped `#` are ignored (`\#` is a literal hash).
   Not counted: names listed only in `.PHONY:` or other special targets starting with `.`, pattern rules (`%`), names
@@ -97,11 +105,14 @@ spec:
   `too many include problems (limit 20)`. Words echoed in messages are truncated to 200 characters (`…`).
   Includes outside the service directory, such as a shared `../common.mk` in a monorepo, are rejected even with
   `-include`; copy shared targets into the service directory instead.
-  When any of these occur, only these problems are reported (the target list would be incomplete), in line order.
+  When any of these occur, only these problems are reported (the target list would be incomplete), in line order,
+  after any shadowing-makefile violations.
 - Text output: `<file>: valid (idp-service.v1.json)`, or one line per violation, e.g.
-  `idp.yaml: Makefile: missing required target 'lint'`.
+  `idp.yaml: Makefile: missing required target 'lint'` or
+  `idp.yaml: GNUmakefile: GNU make reads this file before Makefile, but only Makefile is validated; remove or rename it`.
 - `--json` prints exactly one JSON line with keys `file`, `valid`, `schema`, `violations` (each `{path, message}`;
-  schema violations use the dotted field path, Make violations use `Makefile`):
+  schema violations use the dotted field path, Make violations use `Makefile`, except shadowing-makefile violations,
+  whose `path` is the entry name, e.g. `GNUmakefile`):
 
 ```json
 {"file": "idp.yaml", "valid": false, "schema": "idp-service.v1", "violations": [{"path": "Makefile", "message": "missing required target 'test-component'"}]}
