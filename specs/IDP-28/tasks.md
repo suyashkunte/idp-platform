@@ -148,7 +148,7 @@ T14.
   - Then add the `~` check to `_lexically_outside`, after stripping leading `./` runs (`_LEADING_DOT_SLASH`).
   - (AC-13) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
     packages/idp-gate/tests/test_conformance.py.
-- [ ] T14 Profile words outside the profile directory; shared display helper.
+- [x] T14 Profile words outside the profile directory; shared display helper.
   - Add the AC-14 mark and the four new cases to `test_unpinnable_dynamic_include_fails_without_running_make`, and
     `needs_make` `test_profile_dir_include_cannot_read_outside_profile_dir` (red: PASS and `evil-ran`). Change
     `test_profile_dir_include_is_pinned_with_resolved_path` to `$(IDP_PROFILE_DIR)/sub/extra.mk`.

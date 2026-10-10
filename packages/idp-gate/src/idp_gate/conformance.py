@@ -74,20 +74,17 @@ def _assume_old(words: tuple[str, ...]) -> list[str] | None:
 
 def _profile_names(words: tuple[str, ...], profile_dir: str) -> tuple[list[str], str | None]:
     """Resolved paths for `$(IDP_PROFILE_DIR)/<rest>` words, in order, or `([], word)` for the first word that
-    cannot be pinned (another variable, a `$`/glob character in `<rest>`, or an empty `<rest>`)."""
+    cannot be pinned (another variable, a `$`/glob character in `<rest>`, an empty `<rest>`, or a `<rest>` that
+    leaves the profile directory: a `..` segment or a leading `/`)."""
     names: list[str] = []
     for word in words:
         rest = word[len(PROFILE_DIR_PREFIX) :]
         if not word.startswith(PROFILE_DIR_PREFIX) or not rest or any(c in rest for c in _UNPINNABLE_CHARS):
             return [], word
+        if rest.startswith("/") or ".." in rest.split("/"):
+            return [], word
         names.append(f"{profile_dir}/{rest}")
     return names, None
-
-
-def _shown(word: str) -> str:
-    """`repr(word)` truncated to contract.MAX_SHOWN_WORD characters (the word is untrusted and echoed)."""
-    text = repr(word)
-    return text if len(text) <= contract.MAX_SHOWN_WORD else text[: contract.MAX_SHOWN_WORD] + "…"
 
 
 def _invalid(directory: Path, violations: Sequence[contract.Violation]) -> Result:
@@ -153,6 +150,7 @@ def check_example(directory: Path, make: str, root: Path) -> Result:
         return Result(directory, ok=False, reason="outside examples directory")
     path = directory / EXAMPLE_FILE
     doc, violations, scan = contract.load_service(path)
+    # The scan is empty only when the Makefile was not scanned, which always comes with violations: never used below.
     if violations:
         return _invalid(directory, violations)
     try:
@@ -161,7 +159,7 @@ def check_example(directory: Path, make: str, root: Path) -> Result:
         return Result(directory, ok=False, reason="profile: " + "; ".join(exc.lines))
     names, unpinnable = _profile_names(scan.dynamic_include_words, profile_dir)
     if unpinnable is not None:
-        return Result(directory, ok=False, reason=f"dynamic include {_shown(unpinnable)} cannot be pinned")
+        return Result(directory, ok=False, reason=f"dynamic include {contract.shown(unpinnable)} cannot be pinned")
     assume_old = _assume_old((*scan.include_words, *names))
     if assume_old is None:
         return Result(directory, ok=False, reason="include words exceed the make argument limit")

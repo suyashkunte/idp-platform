@@ -225,26 +225,26 @@ def _read_capped(path: Path) -> str | None:
     return None if len(data) > MAX_MAKEFILE_BYTES else data.decode("utf-8")
 
 
-def _shown(name: str) -> str:
+def shown(name: str) -> str:
     """`repr(name)` for messages, truncated to MAX_SHOWN_WORD characters (untrusted input is echoed)."""
     text = repr(name)
     return text if len(text) <= MAX_SHOWN_WORD else text[:MAX_SHOWN_WORD] + "…"
 
 
 def _cannot_read(name: str) -> Violation:
-    return Violation(MAKE_PATH, f"cannot read {_shown(name)}")
+    return Violation(MAKE_PATH, f"cannot read {shown(name)}")
 
 
 def _outside(word: str | None) -> Violation:
     if word is None:
         return Violation(MAKE_PATH, "Makefile resolves outside the service directory")
-    return Violation(MAKE_PATH, f"include {_shown(word)} is outside the service directory")
+    return Violation(MAKE_PATH, f"include {shown(word)} is outside the service directory")
 
 
 def _backslash_include(name: str) -> Violation:
     return Violation(
         MAKE_PATH,
-        f"include line in {_shown(name)} uses a backslash (continuation or escape); write each include word literally"
+        f"include line in {shown(name)} uses a backslash (continuation or escape); write each include word literally"
         " on one line",
     )
 
@@ -252,7 +252,7 @@ def _backslash_include(name: str) -> Violation:
 def _ambiguous_define_line(name: str) -> Violation:
     return Violation(
         MAKE_PATH,
-        f"define body in {_shown(name)} has a line make reads differently in skipped conditional branches"
+        f"define body in {shown(name)} has a line make reads differently in skipped conditional branches"
         " (nested define, endef followed by '#', or tab-indented endef); remove it",
     )
 
@@ -260,7 +260,7 @@ def _ambiguous_define_line(name: str) -> Violation:
 def _modifier_define(name: str) -> Violation:
     return Violation(
         MAKE_PATH,
-        f"{_shown(name)} has a define with export, unexport or private, which GNU make 3.81 and 4.x read differently;"
+        f"{shown(name)} has a define with export, unexport or private, which GNU make 3.81 and 4.x read differently;"
         " use define or override define",
     )
 
@@ -268,7 +268,7 @@ def _modifier_define(name: str) -> Violation:
 def _foreign_character(name: str, match: re.Match[str]) -> Violation:
     return Violation(
         MAKE_PATH,
-        f"{_shown(name)} contains a control or space character make reads differently (U+{ord(match.group()):04X});"
+        f"{shown(name)} contains a control or space character make reads differently (U+{ord(match.group()):04X});"
         " use only spaces, tabs and LF or CRLF line endings",
     )
 
@@ -277,7 +277,7 @@ def _foreign_separator(name: str, match: re.Match[str]) -> Violation:
     char = match.group()
     what = "CR not followed by LF" if char == "\r" else f"U+{ord(char):04X}"
     return Violation(
-        MAKE_PATH, f"{_shown(name)} contains a line separator make does not use ({what}); use LF or CRLF line endings"
+        MAKE_PATH, f"{shown(name)} contains a line separator make does not use ({what}); use LF or CRLF line endings"
     )
 
 
@@ -314,7 +314,7 @@ def _load_makefile(resolved: Path, name: str) -> tuple[list[_Line], list[Violati
     except (OSError, UnicodeDecodeError):
         return _cannot_read(name)
     if text is None:
-        return Violation(MAKE_PATH, f"{_shown(name)} exceeds 1 MiB")
+        return Violation(MAKE_PATH, f"{shown(name)} exceeds 1 MiB")
     if match := _FOREIGN_SEPARATOR.search(text):
         return _foreign_separator(name, match)
     if match := _FOREIGN_CHARACTER.search(text):
