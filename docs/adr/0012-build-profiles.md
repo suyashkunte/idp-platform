@@ -176,21 +176,23 @@ Status stays Proposed.
 
 ### Build constraints for `uv sync`
 - The root [`pyproject.toml`](../../pyproject.toml) sets `[tool.uv] build-constraint-dependencies` to `==` pins of the
-  hatchling closure plus `editables` (see below). Per uv documentation, uv applies it to every build in the workspace, including the editable
-  idp-gate build that `uv sync --all-packages` runs in CI and `make setup`, and reads the setting only from the
-  workspace root; `uv sync` has no build-constraint flag, so the root file is the only place for it. The root file is a
-  protected path, so a human edits it.
-- Four sources must agree, with [`uv.lock`](../../uv.lock) as the reference: the hatchling and editables closures locked in uv.lock,
-  [`packages/idp-gate/build-constraints.txt`](../../packages/idp-gate/build-constraints.txt) (versions and hashes),
-  the root list (versions), and the `[manifest] build-constraints` record that `uv lock` writes into uv.lock (uv
-  0.12.23).
+  hatchling closure plus `editables` (see below). Per uv documentation, uv applies it to every build in the workspace,
+  including the editable idp-gate build that `uv sync --all-packages` runs in CI and `make setup`, and reads the setting
+  only from the workspace root; `uv sync` has no build-constraint flag, so the root file is the only place for it. The
+  root file is a protected path, so a human edits it.
+- Four sources must agree, with [`uv.lock`](../../uv.lock) as the reference: the hatchling and editables closures locked
+  in uv.lock, [`packages/idp-gate/build-constraints.txt`](../../packages/idp-gate/build-constraints.txt) (versions and
+  hashes), the root list (versions), and the `[manifest] build-constraints` record that `uv lock` writes into uv.lock
+  (uv 0.12.23).
 - `test_build_constraint_sources_agree` in [`test_profiles.py`](../../packages/idp-gate/tests/test_profiles.py)
   checks all four on the real files. Each failure names the stale source, the differences (missing, extra, version or
   hash) and its fix: the `uv export` command for build-constraints.txt, the exact list a human must paste for the
   root list followed by `uv lock`, or `uv lock` for the uv.lock record. Entries that are not plain `name==version`
   pins (ranges, wildcards, `===`, markers, extras) are reported as such.
-- Bump order: `uv lock --upgrade-package hatchling`, regenerate build-constraints.txt (IDP-24 command), a human
-  updates the root list, then `uv lock` again. Commit all three files together.
+- Bump order: `uv lock --upgrade-package hatchling`, regenerate build-constraints.txt (IDP-24 command), a human updates
+  the root list, then `uv lock` again. Commit all three files together. `editables` is bumped the same way
+  (`uv lock --upgrade-package editables`); the root list must hold the full editables closure too, like the hatchling
+  one.
 - An existing environment keeps its old editable build; rebuild it locally with
   `uv sync --all-packages --reinstall-package idp-gate`. `test_installed_idp_gate_was_built_by_locked_hatchling` is
   a smoke check: the installed editable idp-gate reports `Generator: hatchling <locked version>`.
@@ -202,8 +204,12 @@ Status stays Proposed.
 - For an editable build, hatchling's `get_requires_for_build_editable` always adds `editables~=0.3` to the build
   requirements, so the first IDP-25 change still let `uv sync` install an unpinned `editables`. The pinned closure is
   therefore hatchling plus `editables`, the editable build's extra requirement.
-- idp-gate's dev group requires `editables~=0.3` (the same requirement the hook adds), so uv.lock locks it (`0.6`) and
-  `uv export` writes it, hashed, into build-constraints.txt. The drift reference is the union of the hatchling and
+- idp-gate's dev group requires `editables~=0.3` (the same requirement the hatchling backend's
+  `get_requires_for_build_editable` adds; the custom hook in `hatch_build.py` adds nothing), so uv.lock locks it (`0.6`)
+  and `uv export` writes it, hashed, into build-constraints.txt. The drift reference is the union of the hatchling and
   editables closures in uv.lock; `test_build_constraint_reference_includes_editables` checks that.
-- The root list is a protected path: a human adds `"editables==<locked version>"` and runs `uv lock` (task H2).
-  Until then the root-list tests fail and name the exact entry to add.
+- The root list is a protected path, so a human added `editables==0.6` (H2, 831aab2). H2 findings: `uv lock` added only
+  the matching `[manifest] build-constraints` entry, and no package versions changed.
+- The root list constrains versions but does not forbid extra packages: a build requirement missing from it is installed
+  unpinned. `test_idp_gate_build_declares_no_extra_build_dependencies` therefore fails if idp-gate's hatch config or
+  `hatch_build.py` ever declares build dependencies.

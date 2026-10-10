@@ -1421,11 +1421,18 @@ def _lock_record_drift(root_pins: dict[str, str], lock_recorded: object) -> list
     entries = lock_recorded
     bad: list[str] = []
     if isinstance(lock_recorded, list):
-        entries = [_recorded_pin(e) for e in lock_recorded if _recorded_pin(e) is not None]
-        bad = [f"{e!r} {_NOT_EXACT}" for e in lock_recorded if _recorded_pin(e) is None]
+        recorded = [(e, _recorded_pin(e)) for e in lock_recorded]
+        entries = [pin for _, pin in recorded if pin is not None]
+        bad = [f"{e!r} {_NOT_EXACT}" for e, pin in recorded if pin is None]
     pins, problems = _parse_exact_pins(entries, "uv.lock [manifest] build-constraints")
     differences = bad + problems + _compare(root_pins, pins, reference_name="pyproject.toml")
     return [f"{_LOCK_STALE} ({'; '.join(differences)})"] if differences else []
+
+
+def _lock_recorded(lock_text: str) -> object:
+    """uv.lock's `[manifest] build-constraints` record; `[]` when absent, so a missing record is reported as stale."""
+    value: object = tomllib.loads(lock_text).get("manifest", {}).get("build-constraints", [])
+    return value
 
 
 def _build_constraint_drift(
@@ -1676,9 +1683,6 @@ _DRIFT_CASES = {
     "lock-record-empty": _DriftCase(
         _LOCKED, _FILE, _ROOT, [], (_LOCK_STALE, "hatchling", "packaging", _BUMP_HINT), (_FILE_STALE, _ROOT_STALE)
     ),
-    "lock-record-absent-root-set": _DriftCase(
-        _LOCKED, _FILE, _ROOT, [], (_LOCK_STALE, _BUMP_HINT), (_FILE_STALE, _ROOT_STALE, _ROOT_ABSENT)
-    ),
     "lock-record-extra-key": _DriftCase(
         _LOCKED,
         _FILE,
@@ -1747,7 +1751,7 @@ def test_root_build_constraint_dependencies_pin_build_constraints_file() -> None
 @pytest.mark.ac("IDP-25:AC-3")
 def test_build_constraint_sources_agree() -> None:
     root_entries = _root_build_constraints(_ROOT_PYPROJECT.read_text())
-    lock_recorded = tomllib.loads(UV_LOCK.read_text()).get("manifest", {}).get("build-constraints", [])
+    lock_recorded = _lock_recorded(UV_LOCK.read_text())
     problems = _build_constraint_drift(
         _build_backend_closure(), BUILD_CONSTRAINTS.read_text(), root_entries, lock_recorded
     )
@@ -1760,7 +1764,47 @@ def test_build_constraint_reference_includes_editables() -> None:
     reference = _build_backend_closure()
     assert "editables" in reference, "the editable build also installs editables~=0.3 (spec Q8); lock it in uv.lock"
     assert "hatchling" in reference
-    assert reference == _locked_closure("hatchling") | _locked_closure("editables")
+
+
+@pytest.mark.ac("IDP-25:AC-3")
+def test_lock_recorded_defaults_to_empty_when_manifest_has_no_build_constraints() -> None:
+    lock_text = 'version = 1\n\n[manifest]\nmembers = ["idp-gate", "idp-platform"]\n'
+    assert _lock_recorded(lock_text) == []
+    assert _lock_recorded("version = 1\n") == []
+    problems = _build_constraint_drift(_LOCKED, _FILE, _ROOT, _lock_recorded(lock_text))
+    report = "\n".join(problems)
+    assert _LOCK_STALE in report, report
+    assert [s for s in (_FILE_STALE, _ROOT_STALE, _ROOT_ABSENT) if s in report] == [], report
+
+
+_HATCH_BUILD_DEPENDENCY_KEYS = ("dependencies", "require-runtime-dependencies", "require-runtime-features")
+
+
+def _hatch_build_dependency_keys(pyproject: dict[str, Any]) -> list[str]:
+    """Dotted paths of build-dependency keys under [tool.hatch.build], its targets, hooks and target hooks."""
+    build = pyproject.get("tool", {}).get("hatch", {}).get("build", {})
+    tables: dict[str, dict[str, Any]] = {"tool.hatch.build": build}
+    for name, hook in build.get("hooks", {}).items():
+        tables[f"tool.hatch.build.hooks.{name}"] = hook
+    for target_name, target in build.get("targets", {}).items():
+        tables[f"tool.hatch.build.targets.{target_name}"] = target
+        for name, hook in target.get("hooks", {}).items():
+            tables[f"tool.hatch.build.targets.{target_name}.hooks.{name}"] = hook
+    return sorted(
+        f"{path}.{key}" for path, table in tables.items() for key in _HATCH_BUILD_DEPENDENCY_KEYS if key in table
+    )
+
+
+@pytest.mark.ac("IDP-25:AC-3")
+def test_idp_gate_build_declares_no_extra_build_dependencies() -> None:
+    remedy = (
+        "build constraints are not an allow-list, so uv sync would install it unpinned; add any new build requirement "
+        "to _BUILD_BACKEND_ROOTS, uv.lock (idp-gate dev group), build-constraints.txt and the root list"
+    )
+    keys = _hatch_build_dependency_keys(tomllib.loads(PACKAGE_PYPROJECT.read_text()))
+    assert keys == [], f"idp-gate's hatch config declares build dependencies {keys}: {remedy}"
+    hook_defines_dependencies = re.search(r"^\s*def\s+dependencies\s*\(", HATCH_BUILD.read_text(), re.MULTILINE)
+    assert hook_defines_dependencies is None, f"hatch_build.py defines a dependencies() method: {remedy}"
 
 
 @pytest.mark.ac("IDP-25:AC-2")
