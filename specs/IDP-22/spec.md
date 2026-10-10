@@ -39,6 +39,35 @@ Facts checked in the repository (2026-10-10, branch `feature/IDP-22-makefile-con
 - Negative conformance fixtures live in `tests/conformance/fixtures/<name>/` and are used by
   `tests/conformance/test_examples.py`.
 
+## Amendment (2026-10-10, after review loop 1)
+AC-1..AC-4 were implemented (draft PR #11: dba546c tests; 214fe8f, f9e3879, df4515e, 96cbd1e T1-T5; b2c45f3 docs).
+The review found two important gaps, and the human decided to fix them in this PR (spec re-approval needed):
+- M1 (security): a makefile can remake itself. With `Makefile: evil.txt ; cp evil.txt Makefile`, GNU make
+  remakes `Makefile`, restarts and runs the new content, so `-f Makefile` (AC-2) alone does not guarantee that the
+  validated file runs (reproduced by the reviewer with GNU Make 3.81). The same applies to a literal include that a
+  rule generates or updates (`-include gen.mk` plus `gen.mk: ...`). Added as AC-5.
+- M3 (security, pre-existing): `contract._load_yaml` catches only `yaml.YAMLError`, so an `idp.yaml` that cannot be
+  read (`OSError`) or decoded (`UnicodeDecodeError`) raises a traceback out of `idp validate` and stops
+  `idp conformance` for all remaining examples. Added as AC-6.
+- Test hardening under existing ACs (no new AC): an `OSError` case for the AC-3 "resolves outside" test, and the AC-4
+  private-member test also catching `from idp_gate.contract import _x` / `from .contract import _x`.
+
+Facts checked for the amendment (current code on the branch):
+- `contract.MakefileScan` has `targets` and `violations` only. `_Scanner.queue(word)` dedups include words by
+  `os.path.normpath(word)` and caps them at `MAX_INCLUDE_WORDS` (1024) distinct keys; words for files not on disk are
+  queued and then skipped by `_locate` (returns None); `$`/glob words never reach `queue` (`_include_words`).
+- `conformance._run_make_verify(directory, make, profile_dir)` builds
+  `[make, "--no-print-directory", "-C", dir, "-f", "Makefile", "verify", "IDP_PROFILE_DIR=..."]`.
+  `check_example` gets `(doc, violations)` from `contract.load_service(path)`; the scan result is not exposed.
+- `contract.load_service` calls `_load_yaml(path)`, which raises `OSError`/`UnicodeDecodeError` from
+  `path.read_text`. `profiles.load` relies on that: it wraps `contract._load_yaml` in
+  `except (OSError, UnicodeDecodeError)` and reports `cannot read '<name>': <exc>` (pinned by
+  `test_profiles.py::test_profile_show_unreadable_profile_exits_2`, IDP-18 AC-5, which also monkeypatches `_load_yaml`
+  to raise `PermissionError`).
+- `test_conformance.py::test_check_example_parses_idp_yaml_once_for_validation_and_profile` stubs `_run_make_verify`
+  with the 3-argument signature; `test_conformance_reports_make_timeout` (IDP-19) and
+  `test_make_verify_is_invoked_with_f_makefile` (IDP-22 AC-2) assert the exact argv.
+
 ## Requirements
 - **AC-1** Given a service directory containing a valid `Makefile` and also a `GNUmakefile` or `makefile`, when I run `idp validate`, then it exits 1 and reports a violation naming the extra file.
   - "Extra file": a directory entry, found by listing the service directory (the directory of the validated
@@ -98,6 +127,9 @@ Facts checked in the repository (2026-10-10, branch `feature/IDP-22-makefile-con
     resolved DIR, so real subdirectories still pass.
   - The non-symlink "resolved outside DIR" branch is defence in depth (for example a mount point or an entry replaced
     between listing and checking); it is tested by monkeypatching the resolution of one entry.
+  - Hardening (amendment): that test also covers resolution raising `OSError` (for example `FileNotFoundError`,
+    an entry removed between listing and checking), next to the existing "resolves elsewhere" and `RuntimeError`
+    cases.
 - **AC-4** Given a valid example, then `idp.yaml` is parsed once and the same document is validated and used for profile resolution (no private `contract._load_yaml` call from `conformance.py`).
   - New public `contract.load_service(path) -> tuple[Any, list[Violation]]`: parses `idp.yaml` once and returns the
     parsed document together with the same violations `validate_service(path)` returns today (schema, then Make
@@ -110,6 +142,66 @@ Facts checked in the repository (2026-10-10, branch `feature/IDP-22-makefile-con
   - Verified by a test that wraps `contract._load_yaml` to count parses of `idp.yaml` (exactly 1 for a valid example)
     and records the profile name passed to `profiles.resolve` (equal to the one in the parsed document), with
     `_run_make_verify` stubbed (no make needed), plus the `ast` test.
+  - Hardening (amendment): the `ast` test also fails on `from idp_gate.contract import _x` and
+    `from .contract import _x` (any imported name starting with `_` from the contract module).
+- **AC-5** Given an example whose `Makefile`, or a file it names in a literal `include`/`-include`/`sinclude` word, has a rule that would remake that makefile (for example `Makefile: evil.txt ; cp evil.txt Makefile`, or `-include gen.mk` with a rule that generates `gen.mk`), when `idp conformance` runs `make verify`, then make is invoked with assume-old (`-o`) for `Makefile` and for every literal include word the validation scan saw, so make neither remakes those files nor restarts with unvalidated content, and the validated `verify` recipe runs.
+  - Added by the amendment (review M1). Builds on AC-2 (`-f Makefile` stays).
+  - Option form: `--assume-old=<word>` (the long form of `-o`, same GNU make semantics, supported by 3.81 and 4.x).
+    The `=` form keeps a word that starts with `-` from being read as another option. One option per name, placed
+    after `-f Makefile` and before the target `verify` (no reliance on argument permutation). ASSUMPTION A9, Q12.
+  - Names passed: `Makefile` first, then every distinct literal include word in the order the scan first saw it,
+    exactly as written in the include line (make names an included makefile's target by the word as written,
+    relative to the `-C` directory). A word written with leading `./` is passed both as written and with the leading
+    `./` segments removed, in case make strips them when it enters the file. ASSUMPTION A10, Q15.
+  - "Every literal include word the scan saw" includes words for files that do not exist at validation time: a
+    missing `-include gen.mk` with a rule that creates it is the generated-include attack. Words the scan rejects
+    (absolute, `..`, NUL, outside the service directory) already make `idp validate` fail, so make never runs for
+    them. ASSUMPTION A11, Q13.
+  - Source of the words: `contract.MakefileScan` gains `include_words: tuple[str, ...]` (default `()`), filled by
+    `_Scanner.queue` with each distinct word as written. `idp.yaml` is still parsed once (AC-4 holds): after
+    `load_service` reports no violations, `check_example` obtains the words from one more
+    `contract.makefile_targets(directory / "Makefile")` scan of the Makefile only. If that scan reports violations
+    (the files changed between the two scans), the example fails `idp validate: <n> violation(s)` with those
+    violations and make does not run. ASSUMPTION A12, Q11.
+  - Bounded argv: the scan records at most `MAX_INCLUDE_WORDS` (1024) distinct spellings (exceeding it stops the
+    scan with the existing `too many include words (limit 1024)` violation, so validation fails). In addition,
+    conformance caps the total size of the `--assume-old=` arguments at `MAX_ASSUME_OLD_BYTES` = 64 KiB (well under
+    Linux `MAX_ARG_STRLEN` 128 KiB per argument and macOS/Linux `ARG_MAX`); above it the example fails
+    `FAIL <x>: include words exceed the make argument limit` and make does not run. ASSUMPTION A13, Q14.
+  - Not covered (residual risk): includes whose words contain `$`, globs or come from `$(eval ...)`/`define`
+    bodies are not scanned (IDP-17), so they are not pinned; for example `examples/minimal-service`'s
+    `include $(IDP_PROFILE_DIR)/defaults.mk`. A rule targeting `$(IDP_PROFILE_DIR)/defaults.mk` could still remake
+    it. Changing include-following is out of scope per the ticket; see Q16.
+  - Assume-old semantics (to be confirmed by the real-make tests on GNU Make 3.81 locally and 4.x in CI): an
+    existing named file is not remade even if its prerequisites are newer; a missing named file is treated as
+    up to date, so no rule creates it (`-include` then skips it; plain `include` makes make fail). ASSUMPTION A14.
+  - Verified by: scanner unit tests (`include_words` order, dedup by exact spelling, missing files included,
+    `$`/glob words excluded, the cap); an argv test with a fake `Popen`; the argument-limit test; and real-make tests
+    (`needs_make`) run through `idp conformance` for (1) a self-remaking `Makefile` (an `evil.txt` newer than
+    `Makefile`), (2) a missing `-include gen.mk` generated by a rule, (3) an existing `include common.mk` that a rule
+    regenerates from a newer source, and (4) the `./gen.mk` spelling. Each must print `PASS`, leave a marker written
+    by the validated `verify` recipe, leave no marker from the injected content, and leave `Makefile`/the include
+    byte-for-byte unchanged (or still absent).
+- **AC-6** (edge) Given an `idp.yaml` that cannot be read or is not valid UTF-8, when I run `idp validate` or `idp conformance`, then it is reported as a violation (`idp validate` exits 1; `idp conformance` prints a FAIL line for that example) instead of a traceback, and conformance continues with the remaining examples.
+  - Added by the amendment (review M3, pre-existing since IDP-17).
+  - `contract.load_service` catches `OSError` and `UnicodeDecodeError` around its `_load_yaml` call and returns
+    `(None, [Violation("", message)])`; Make checks are skipped (as for invalid YAML). Messages
+    (ASSUMPTION A15, Q17):
+    - `OSError`: `cannot read: <strerror>` (for example `cannot read: Permission denied`; falls back to `str(exc)`
+      when `strerror` is None).
+    - `UnicodeDecodeError`: `cannot read: not valid UTF-8 (<reason> at byte <start>)` (for example
+      `cannot read: not valid UTF-8 (invalid start byte at byte 6)`).
+    Text output: `idp.yaml: <root>: cannot read: Permission denied`; `--json`: `{"path": "", "message": ...}`.
+  - `_load_yaml` keeps raising: `profiles.load` depends on catching the exceptions itself and its messages
+    (`cannot read '<name>': ...`, IDP-18 AC-5) stay unchanged; `test_profiles.py` stays green unchanged.
+  - `idp validate`: the existing "not found" path is unchanged (`validate: <path> not found`, exit 2, when
+    `is_file()` is false); everything that passes that check but cannot be read is now exit 1 with the violation.
+  - `idp conformance`: the example fails `idp validate: 1 violation(s)` with the violation as detail line; the loop
+    continues and the summary counts it as failed.
+  - `contract.validate_file` (schema-only helper, not used by the CLI) is unchanged (Q18).
+  - Verified by `tmp_path` tests: non-UTF-8 bytes in `idp.yaml` (real file) and an unreadable file (monkeypatched
+    `contract._load_yaml` raising `PermissionError`, so the test does not depend on running as non-root), for
+    `idp validate` (text and `--json`) and for `idp conformance` with a second, valid example that still PASSes.
 
 ## Edge cases and assumptions
 - Case-insensitive filesystems (macOS APFS default): `Makefile` and `makefile` cannot both exist. A directory holding
@@ -142,6 +234,28 @@ Facts checked in the repository (2026-10-10, branch `feature/IDP-22-makefile-con
 - ASSUMPTION A8: docs to update are `docs/platform/service-contract.md` (as the ticket says, at its real path) and one
   sentence in `docs/platform/onboarding.md` (conformance behaviour); CHANGELOG entry under `[Unreleased]` /
   `### Changed`.
+- Amendment edge cases (AC-5, AC-6):
+  - A Makefile with a rule for `Makefile` (or for an include) is still valid for `idp validate`; only the conformance
+    run pins it (decision D3).
+  - `include a.mk ./a.mk` (two spellings of one file): both spellings are passed (distinct written words); the
+    scan still reads the file once (normpath dedup unchanged).
+  - The same word in several files or lines is passed once.
+  - A literal include word that names a directory or a file make cannot read: validation already reports it
+    (`cannot read`), so make does not run.
+  - Plain `include gen.mk` with a missing `gen.mk` and a generating rule: with assume-old, make does not create it and
+    fails (`No such file or directory`), so the example FAILs with `make verify exited 2`. That is correct: the
+    validated content alone cannot satisfy the include.
+  - Recipes that call `$(MAKE) -f other.mk` or write files during `verify` are not prevented (sandboxing is IDP-23).
+  - An `idp.yaml` that is a FIFO or device is not discovered (`is_file()` false) and is not opened.
+- ASSUMPTION A9: `--assume-old=<word>` long form, before the target.
+- ASSUMPTION A10: words passed exactly as written, plus the `./`-stripped variant when the word starts with `./`.
+- ASSUMPTION A11: words for missing files are recorded and pinned.
+- ASSUMPTION A12: conformance re-scans the Makefile (not `idp.yaml`) to obtain the words; `load_service` keeps its
+  `(doc, violations)` return type.
+- ASSUMPTION A13: 1024-spelling cap in the scanner plus a 64 KiB argument budget in conformance.
+- ASSUMPTION A14: GNU make assume-old behaves as described for both existing and missing files (3.81 and 4.x);
+  confirmed by the real-make tests.
+- ASSUMPTION A15: AC-6 messages as written; the violation path is `""` (shown as `<root>`), like invalid YAML.
 
 ## Non-functional requirements
 - No new dependencies: stdlib only (`os.listdir`, `pathlib`, `ast` in tests). `packages/idp-gate/pyproject.toml` and
@@ -160,6 +274,12 @@ Facts checked in the repository (2026-10-10, branch `feature/IDP-22-makefile-con
   `infra/**`, plugin hooks, `.claude-plugin/**`. No human task needed.
 - Quality bars unchanged: mypy strict, ruff, bandit, coverage >= 85 %, diff-cover >= 80 %; `idp spec-trace IDP-22`
   green.
+- Amendment: the make argv stays bounded: at most 1024 recorded include spellings (scanner cap) and at most 64 KiB of
+  `--assume-old=` arguments (conformance cap). The extra Makefile scan in conformance reads at most the same capped
+  bytes as validation (1 MiB per file, 64 files). `idp.yaml` is still parsed once per example.
+- Amendment: `examples/minimal-service` still PASSes with the new argv (its only include is dynamic, so the argv
+  gains just `--assume-old=Makefile`). The real-make tests run on GNU Make 3.81 (macOS) and 4.x (Linux CI).
+- Amendment: no traceback escapes `idp validate`/`idp conformance` for an unreadable or undecodable `idp.yaml`.
 
 ## Out of scope
 - Sandboxing make / an environment allow-list for `idp conformance` (IDP-23).
@@ -167,6 +287,18 @@ Facts checked in the repository (2026-10-10, branch `feature/IDP-22-makefile-con
 - Symlinked `idp.yaml` inside a real example directory; `profiles.py`'s use of `contract._load_yaml`.
 - Preventing TOCTOU swaps of example entries; Windows junctions.
 - Detecting makefiles selected by `MAKEFILES` or `-f` in tenant CI (the runner already strips `MAKEFILES`).
+- Amendment: pinning dynamic includes (`$(...)`, globs, `$(eval)`, `define` bodies), including the profile's
+  `$(IDP_PROFILE_DIR)/defaults.mk` (residual risk, Q16); include files make finds through its default include
+  directories (`/usr/include`, `-I`) rather than relative to the example; recursive `$(MAKE)` calls in recipes.
+- Amendment: making `idp validate` reject rules that target `Makefile` or an include (decision D3).
+
+## Decisions (review loop 1, 2026-10-10, by the human)
+- D1: Not done: de-duplicating the `_case_sensitive` test helper that exists in both `test_contract.py` and
+  `test_conformance.py` (cosmetic).
+- D2: Not done: changing the front-matter `status`; repository convention keeps `DRAFT` (see IDP-25).
+- D3: Not done: a scanner-level violation for rules whose target is `Makefile` or an include. A valid Makefile can
+  already make `verify` a no-op, so `idp validate` is not a security boundary for tenant content; the conformance
+  assume-old pinning (AC-5) is the guarantee that the validated file is what runs.
 
 ## Open questions
 - Q1: AC-3 says `FAIL <x>: outside examples directory`. Every other result line shows the path built from DIR
@@ -198,11 +330,37 @@ Facts checked in the repository (2026-10-10, branch `feature/IDP-22-makefile-con
   for the conformance changes (`-f Makefile`, symlinked entries FAIL) (A8).
 - Q10: Should `profiles.py`'s own `contract._load_yaml` call move to the new public API in this ticket? Proposed: no
   (not in the AC, and `test_profiles.py` monkeypatches `_load_yaml`); a follow-up if wanted.
+- Q11 (amendment): How does conformance get the include words without re-parsing `idp.yaml`? Proposed: after
+  `load_service` passes, one more `contract.makefile_targets(directory / "Makefile")` scan (Makefile and includes
+  only, same caps); a violation in that scan fails the example as `idp validate`. `load_service` keeps returning
+  `(doc, violations)` (A12). Alternative: `load_service` returns a small result object carrying the scan, which
+  changes its return type and the conformance unpacking.
+- Q12 (amendment): `--assume-old=<word>` (long form) instead of `-o <word>`? Proposed: yes; same semantics, and a
+  word starting with `-` cannot be read as an option (A9).
+- Q13 (amendment): Pin include words whose file does not exist at validation time? Proposed: yes; that is exactly
+  the generated-include case (`-include gen.mk` plus a rule creating it) (A11).
+- Q14 (amendment): Argument budget for the `--assume-old=` list: 64 KiB total, above it
+  `FAIL <x>: include words exceed the make argument limit` without running make? Proposed: yes (A13). Alternative:
+  a per-word length cap in the scanner reported by `idp validate`.
+- Q15 (amendment): Also pass the `./`-stripped spelling of a word that starts with `./`? Proposed: yes, both
+  spellings, because it is unconfirmed whether make keys the include target with or without the `./`; the real-make
+  test for `./gen.mk` confirms that one of them is effective (A10).
+- Q16 (amendment): Residual risk: dynamic includes are not pinned, notably `$(IDP_PROFILE_DIR)/defaults.mk`, which
+  conformance could pin as `--assume-old=<profile_dir>/defaults.mk` because it knows `profile_dir`. Proposed: not in
+  this PR (the ticket excludes include-following changes, and the name would depend on how the example spells its
+  include); record in the docs and file a follow-up next to IDP-23.
+- Q17 (amendment): AC-6 message text: `cannot read: <strerror>` and
+  `cannot read: not valid UTF-8 (<reason> at byte <start>)`, path `""` (shown `<root>`)? Proposed: yes (A15).
+  Alternative: path `idp.yaml`.
+- Q18 (amendment): Should the schema-only `contract.validate_file` also turn read errors into violations? Proposed:
+  no; the CLI does not use it, and AC-6 names `idp validate`/`idp conformance` only.
 
 ## Traceability
 | AC | Planned tests |
 |----|---------------|
-| AC-1 | packages/idp-gate/tests/test_contract.py::test_extra_gnumakefile_or_makefile_beside_valid_makefile_is_a_violation, packages/idp-gate/tests/test_contract.py::test_extra_makefile_names_match_case_insensitively, packages/idp-gate/tests/test_contract.py::test_extra_makefile_check_fails_closed_when_directory_cannot_be_listed, packages/idp-gate/tests/test_contract.py::test_extra_makefile_violation_in_json_output, tests/conformance/test_examples.py::test_conformance_fails_example_with_gnumakefile_bypass |
+| AC-1 | packages/idp-gate/tests/test_contract.py::test_extra_gnumakefile_or_makefile_beside_valid_makefile_is_a_violation, packages/idp-gate/tests/test_contract.py::test_extra_makefile_names_match_case_insensitively, packages/idp-gate/tests/test_contract.py::test_extra_makefile_names_are_compared_as_listed_on_every_filesystem, packages/idp-gate/tests/test_contract.py::test_extra_makefile_check_fails_closed_when_directory_cannot_be_listed, packages/idp-gate/tests/test_contract.py::test_extra_makefile_violation_in_json_output, tests/conformance/test_examples.py::test_conformance_fails_example_with_gnumakefile_bypass |
 | AC-2 | packages/idp-gate/tests/test_conformance.py::test_make_verify_is_invoked_with_f_makefile, packages/idp-gate/tests/test_conformance.py::test_make_verify_ignores_gnumakefile_and_makefile |
 | AC-3 | packages/idp-gate/tests/test_conformance.py::test_conformance_fails_symlinked_example_without_running_make, packages/idp-gate/tests/test_conformance.py::test_conformance_fails_example_resolving_outside_dir, packages/idp-gate/tests/test_conformance.py::test_conformance_accepts_real_examples_under_symlinked_dir |
 | AC-4 | packages/idp-gate/tests/test_conformance.py::test_check_example_parses_idp_yaml_once_for_validation_and_profile, packages/idp-gate/tests/test_conformance.py::test_conformance_module_uses_no_private_contract_members |
+| AC-5 | packages/idp-gate/tests/test_contract.py::test_makefile_scan_records_literal_include_words_as_written, packages/idp-gate/tests/test_contract.py::test_makefile_scan_caps_recorded_include_spellings, packages/idp-gate/tests/test_conformance.py::test_make_verify_pins_makefile_and_include_words_with_assume_old, packages/idp-gate/tests/test_conformance.py::test_conformance_fails_when_include_words_exceed_make_argument_limit, packages/idp-gate/tests/test_conformance.py::test_conformance_fails_when_makefile_changes_between_scans, packages/idp-gate/tests/test_conformance.py::test_make_cannot_remake_validated_makefiles |
+| AC-6 | packages/idp-gate/tests/test_contract.py::test_unreadable_or_undecodable_idp_yaml_is_a_violation, packages/idp-gate/tests/test_conformance.py::test_conformance_reports_unreadable_idp_yaml_and_continues |
