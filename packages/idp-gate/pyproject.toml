@@ -23,4 +23,4 @@ only-include = ["src", "tests", "hatch_build.py", "pyproject.toml"]
 [tool.hatch.build.hooks.custom]
 
 [dependency-groups]
-dev = ["hatchling>=1.25"]
+dev = ["hatchling>=1.25", "editables~=0.3"]
