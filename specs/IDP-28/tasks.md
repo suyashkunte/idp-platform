@@ -108,7 +108,7 @@ T14.
   - Confirm all AC-1/AC-3 tests and `test_include_line_with_backslash_is_a_violation` (four cases) stay green.
   - (AC-6, AC-7, AC-8) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
     packages/idp-gate/tests/test_conformance.py.
-- [ ] T10 Define bodies like make; ambiguous body lines fail closed.
+- [x] T10 Define bodies like make; ambiguous body lines fail closed.
   - Add `test_define_body_lines_close_and_nest_like_make` and `test_ambiguous_define_body_line_is_a_violation`
     (red), and `needs_make` `test_non_nesting_define_body_line_cannot_hide_generated_include` (`define#`,
     `override define B`; red: PASS and `evil-ran` for `define#`) and

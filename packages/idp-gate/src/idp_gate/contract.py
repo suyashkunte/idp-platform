@@ -9,7 +9,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from jsonschema import Draft202012Validator
@@ -26,7 +26,6 @@ _SHADOWING_MAKEFILES = frozenset({"gnumakefile", "makefile"})
 _TARGET_VARIABLE = re.compile(r"\s*(?:(?:export|override|private)\s+)*[^\s:=#;]+\s*(?::{1,3}|[+?!])?=")
 # `define NAME` starts a block; `define := x` (a variable named `define`) does not.
 _DEFINE_START = re.compile(r"^\s*(?:(?:override|export|private)\s+)*define(?:\s|$)(?!\s*(?::{1,3}|[+?!])?=)")
-_DEFINE_END = re.compile(r"^\s*endef(?:\s|$)")
 _COMMENT = re.compile(r"(?<!\\)#")  # `\#` is a literal hash, not a comment
 # Characters Python may split lines on but make does not (make splits on LF only and drops CR before LF).
 # One character class plus a one-character lookahead: never backtracks.
@@ -168,19 +167,40 @@ class _Line:
     raw_code: str
 
 
-def _parsed_lines(text: str) -> list[_Line]:
-    """Collapsed logical lines with comments (unescaped `#`) removed and `define ... endef` bodies (nested) skipped."""
+def _body_line(collapsed: str) -> Literal["end", "ambiguous", "text"]:
+    """Classify a collapsed, not comment-stripped define body line like make's `do_define`. Lines whose meaning
+    depends on whether the enclosing conditional branch is taken (nested `define`, `endef#`, tab-indented `endef`)
+    are "ambiguous": the scanner cannot evaluate conditionals, so they fail closed."""
+    p = collapsed.lstrip(" \t")
+    if collapsed.startswith("\t"):
+        return "ambiguous" if p == "endef" or (p[:5] == "endef" and p[5:6] in (" ", "\t", "#")) else "text"
+    if p == "endef" or (p[:5] == "endef" and p[5:6] in (" ", "\t")):
+        return "end"
+    if p[:6] == "endef#" or p == "define" or (p[:6] == "define" and p[6:7] in (" ", "\t")):
+        return "ambiguous"
+    return "text"
+
+
+def _parsed_lines(text: str) -> tuple[list[_Line], list[str]]:
+    """Collapsed logical lines with comments (unescaped `#`) removed and `define ... endef` bodies skipped (body lines
+    classified by `_body_line`; no nesting count), plus the define problems ("ambiguous") in line order."""
     lines: list[_Line] = []
-    depth = 0
+    problems: list[str] = []
+    in_define = False
     for raw in _logical_lines(text):
-        code = _COMMENT.split(_collapse(raw), maxsplit=1)[0]
-        if depth:
-            depth += 1 if _DEFINE_START.match(code) else -1 if _DEFINE_END.match(code) else 0
-        elif not code.startswith("\t") and _DEFINE_START.match(code):
-            depth = 1
+        collapsed = _collapse(raw)
+        if in_define:
+            kind = _body_line(collapsed)
+            in_define = kind != "end"
+            if kind == "ambiguous":
+                problems.append(kind)
+            continue
+        code = _COMMENT.split(collapsed, maxsplit=1)[0]
+        if not code.startswith("\t") and _DEFINE_START.match(code):
+            in_define = True
         else:
             lines.append(_Line(code, _COMMENT.split(raw, maxsplit=1)[0]))
-    return lines
+    return lines, problems
 
 
 def _read_capped(path: Path) -> str | None:
@@ -214,6 +234,14 @@ def _backslash_include(name: str) -> Violation:
     )
 
 
+def _ambiguous_define_line(name: str) -> Violation:
+    return Violation(
+        MAKE_PATH,
+        f"define body in {_shown(name)} has a line make reads differently in skipped conditional branches"
+        " (nested define, endef followed by '#', or tab-indented endef); remove it",
+    )
+
+
 def _foreign_separator(name: str, match: re.Match[str]) -> Violation:
     char = match.group()
     what = "CR not followed by LF" if char == "\r" else f"U+{ord(char):04X}"
@@ -242,9 +270,9 @@ def _locate(path: Path, word: str | None, root: Path) -> Path | Violation | None
     return resolved if resolved.is_relative_to(root) else _outside(word)
 
 
-def _load_makefile(resolved: Path, name: str) -> list[_Line] | Violation:
-    """Parsed lines of a confined regular file, or a Violation (not a regular file, unreadable, too large, or using a
-    line separator make does not use)."""
+def _load_makefile(resolved: Path, name: str) -> tuple[list[_Line], list[Violation]] | Violation:
+    """Parsed lines and define-body violations of a confined regular file, or a Violation (not a regular file,
+    unreadable, too large, or using a line separator make does not use)."""
     if not resolved.is_file():  # directories, FIFOs, devices: never opened
         return _cannot_read(name)
     try:
@@ -255,7 +283,8 @@ def _load_makefile(resolved: Path, name: str) -> list[_Line] | Violation:
         return Violation(MAKE_PATH, f"{_shown(name)} exceeds 1 MiB")
     if match := _FOREIGN_SEPARATOR.search(text):
         return _foreign_separator(name, match)
-    return _parsed_lines(text)
+    lines, problems = _parsed_lines(text)
+    return lines, [_ambiguous_define_line(name) for _ in problems]
 
 
 @dataclass
@@ -324,10 +353,13 @@ class _Scanner:
             self.stop(f"too many included files (limit {MAX_MAKEFILES})")
             return
         self.visited.add(located)
-        lines = _load_makefile(located, word or MAKE_PATH)
-        if isinstance(lines, Violation):
-            self.problem(lines)
+        loaded = _load_makefile(located, word or MAKE_PATH)
+        if isinstance(loaded, Violation):
+            self.problem(loaded)
             return
+        lines, define_problems = loaded
+        for define_problem in define_problems:
+            self.problem(define_problem)
         for line in lines:
             self.targets |= _rule_names(line.code)
             if _is_include_line(line.code) and "\\" in line.raw_code:  # make would read other words than the scan sees
