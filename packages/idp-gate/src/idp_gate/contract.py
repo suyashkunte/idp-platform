@@ -106,6 +106,7 @@ def _rule_end(line: str) -> int | None:
 def _rule_names(line: str) -> set[str]:
     """Target names defined by a rule line (column 0); special, pattern, `$(...)` names and
     target-specific variable lines (`name: VAR = x`) are dropped."""
+    line = line.replace("\\\n", " ")  # make collapses backslash-newline to one space outside recipes
     end = _rule_end(line)
     if end is None or _TARGET_VARIABLE.match(line, end):
         return set()
@@ -113,11 +114,27 @@ def _rule_names(line: str) -> set[str]:
     return {n for n in names if not n.startswith(".") and "%" not in n and "$" not in n}
 
 
+def _logical_lines(text: str) -> list[str]:
+    """make's logical lines: LF-split, one trailing CR dropped, and a line ending in an odd number of backslashes
+    joined (with its `\\` + newline kept) to the next one. Linear: each physical line is stripped and joined once."""
+    lines: list[str] = []
+    pending: list[str] = []
+    for physical in text.split("\n"):
+        part = physical.removesuffix("\r")
+        pending.append(part)
+        if (len(part) - len(part.rstrip("\\"))) % 2 == 0:
+            lines.append("\n".join(pending))
+            pending = []
+    if pending:
+        lines.append("\n".join(pending))
+    return lines
+
+
 def _parsed_lines(text: str) -> list[str]:
-    """Lines with comments (unescaped `#`) removed and `define ... endef` bodies (nested) skipped."""
+    """Logical lines with comments (unescaped `#`) removed and `define ... endef` bodies (nested) skipped."""
     lines: list[str] = []
     depth = 0
-    for raw in text.splitlines():
+    for raw in _logical_lines(text):
         line = _COMMENT.split(raw, maxsplit=1)[0]
         if depth:
             depth += 1 if _DEFINE_START.match(line) else -1 if _DEFINE_END.match(line) else 0

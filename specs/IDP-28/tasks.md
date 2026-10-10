@@ -6,7 +6,7 @@ defaults), so there is no human task.
 Each task writes its tests first and sees them fail for the expected reason before implementing. Each ends with the
 package tests green. Test names and exact expectations are in plan.md ("Tests").
 
-- [ ] T1 Logical lines.
+- [x] T1 Logical lines.
   - First, confirm in the scratchpad (not committed) with the local GNU Make 3.81 that a comment ending in `\`
     swallows the next line, that `x \` + `endef` inside a define body does not close it, and that CRLF `\` continues.
     If any of these differs, stop and revise the spec (A1). Also try the spec Q16 reproduction and record the result
