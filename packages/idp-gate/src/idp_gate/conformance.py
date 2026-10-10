@@ -11,6 +11,7 @@ import contextlib
 import os
 import signal
 import subprocess  # nosec B404 - list-form argv for make (no shell); see _run_make_verify for the trust assumption
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,7 +69,7 @@ def _assume_old(words: tuple[str, ...]) -> list[str] | None:
     return None if sum(len(a.encode("utf-8")) for a in args) > MAX_ASSUME_OLD_BYTES else args
 
 
-def _invalid(directory: Path, violations: list[contract.Violation] | tuple[contract.Violation, ...]) -> Result:
+def _invalid(directory: Path, violations: Sequence[contract.Violation]) -> Result:
     reason = f"idp validate: {len(violations)} violation(s)"
     return Result(directory, ok=False, reason=reason, details=tuple(str(v) for v in violations))
 
