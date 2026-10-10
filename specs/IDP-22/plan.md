@@ -201,6 +201,73 @@ New AC-5 tests:
 - `CHANGELOG.md`: extend the IDP-22 line: conformance pins `Makefile` and literal includes with `--assume-old`
   (no self-remake), and an unreadable/undecodable `idp.yaml` is a violation instead of a traceback.
 
+## Amendment 2 (2026-10-10, after review loop 2): AC-7, AC-6 nesting, hardening
+T7-T9 are done (ba886b9, d74e0c2, 1e5827f; cap test aligned in 3671157, spec D4). Agent work only; no protected path.
+
+### AC-7: reject backslashes on include lines (contract.py)
+- New helper `_is_include_line(line: str) -> bool` (first whitespace-separated word in `_INCLUDE_DIRECTIVES`),
+  shared by `_include_words`, so both use the same rule for what counts as an include line.
+- In `_Scanner.visit`, for each parsed line: if `_is_include_line(line)` and `"\\" in line` (one backslash
+  character), call `self.problem(Violation(MAKE_PATH, f"include line in {_shown(word or MAKE_PATH)} uses a backslash
+  (continuation or escape); write each include word literally on one line"))` and skip `_include_words` for that line
+  (spec Q20). Rule names on the line are still collected as today (an include line defines none).
+- `_parsed_lines`, `_include_words`' `$`/glob filter, caps and every existing message are unchanged.
+- Tests first:
+  - `test_include_line_with_backslash_is_a_violation` (test_contract.py, parametrized, `tmp_path`, `idp validate`):
+    - `continuation`: `Makefile` with all targets and `-include common.mk \` followed by `  gen.mk`.
+    - `escape`: `-include gen\#.mk`.
+    - `in-include`: `include common.mk`, where `common.mk` has `sinclude x\ y.mk`; the message names `'common.mk'`.
+    - `comment-only`: `include common.mk # see notes \`; no violation, exit 0 (the backslash is in a comment).
+    Expected stdout for the first three: exactly one line
+    `idp.yaml: Makefile: include line in '<file>' uses a backslash (continuation or escape); write each include word literally on one line`,
+    exit 1. For `escape`, also assert `contract.makefile_targets(...).include_words` does not contain `gen\#.mk`
+    (words not queued).
+  - `test_conformance_rejects_backslash_include_lines_without_running_make` (test_conformance.py, `needs_make`,
+    parametrized `mj1-escape` / `mj2-continuation`, run through `idp conformance`). These are the reviewer
+    reproductions: MJ1 with `-include gen\#.mk` and a rule `gen\#.mk:` that writes `$$(shell touch evil-ran)` into
+    `gen#.mk`; MJ2 with `-include common.mk \`, then `  gen.mk`, and a rule `gen.mk:` that generates it the same
+    way, with an existing benign `common.mk`. Expected stdout: `FAIL examples/<x>: idp validate: 1 violation(s)`,
+    the indented `Makefile: include line in 'Makefile' uses a backslash ...` detail, and
+    `conformance: 0 passed, 1 failed`; exit 1; `evil-ran`, `validated-ran`, `gen#.mk` and `gen.mk` absent. Both
+    cases are red before the fix (validation passes and make runs the injected content).
+- Existing `test_contract.py` scanner tests and the AC-5 real-make tests stay green unchanged (none of their
+  Makefiles has a backslash on an include line; check `test_makefile_targets_parses_rules_includes_and_ignores_non_rules`
+  specifically).
+
+### AC-6 clarification: nesting too deep (contract.py)
+- First, a check in T12: confirm with a tiny throwaway command in the scratchpad (not committed) that
+  `yaml.safe_load("[" * 100000)` raises `RecursionError` quickly. If it raises `yaml.YAMLError` instead, that is
+  already handled; then drop the new handler, keep the test, and amend the spec (A17).
+- `load_service`: add `except RecursionError: return None, [Violation("", "cannot parse: nesting too deep")]` to the
+  existing `try` around `_load_yaml` (spec Q21: parse only).
+- Tests first:
+  - `test_deeply_nested_idp_yaml_is_a_violation` (test_contract.py): `idp.yaml` = `"[" * 100000`, plus a valid
+    `Makefile`; `idp validate` prints `idp.yaml: <root>: cannot parse: nesting too deep`, exit 1; `--json` gives
+    `[{"path": "", "message": "cannot parse: nesting too deep"}]`.
+  - `test_conformance_reports_unreadable_idp_yaml_and_continues`: add a `too-deep` case (same layout: the broken
+    example FAILs with the detail `<root>: cannot parse: nesting too deep`, the valid one PASSes).
+
+### Hardening (T13, no behaviour change except the typing)
+- `test_makefile_scan_records_literal_include_words_as_written` and `test_makefile_scan_caps_recorded_include_spellings`:
+  read `scan.include_words` directly (drop `getattr`).
+- `test_conformance_fails_when_include_words_exceed_make_argument_limit`: drop `raising=False` from the
+  `MAX_ASSUME_OLD_BYTES` monkeypatch (the attribute now exists; a rename must fail the test).
+- `conformance._invalid(directory, violations: Sequence[contract.Violation])` (`collections.abc.Sequence`), replacing
+  the union annotation; mypy strict stays green.
+- `test_unreadable_or_undecodable_idp_yaml_is_a_violation`: add case `oserror-no-strerror` where the monkeypatched
+  `_load_yaml` raises `OSError("boom")`; expected `cannot read: boom`.
+
+### Docs (amendment 2)
+- `docs/platform/service-contract.md`, in "How `idp validate` checks it":
+  - New violation: include lines (`include`/`-include`/`sinclude`) must not contain a backslash, so no line
+    continuation and no escapes; exact message; why (the include words must be exactly what make reads).
+  - `idp.yaml` nested too deeply: `<root>: cannot parse: nesting too deep`.
+  - Limitations: a comment ending in `\` is not continued by the scanner (D7).
+- `docs/platform/onboarding.md`: the residual-risk sentence covers every include word containing `$` (D5), not only
+  the profile include.
+- `CHANGELOG.md`: extend the IDP-22 line with: include lines containing a backslash are rejected; deeply nested
+  `idp.yaml` is a violation.
+
 ## Changes
 | File | Change |
 |------|--------|
@@ -220,6 +287,11 @@ New AC-5 tests:
 | packages/idp-gate/tests/test_contract.py (amendment) | AC-5 scanner tests, AC-6 test. |
 | packages/idp-gate/tests/test_conformance.py (amendment) | AC-5 argv, budget, changed-scan and real-make tests; AC-6 conformance test; argv/stub updates in four existing tests; AC-3 `OSError` case; AC-4 `ImportFrom` check. |
 | docs/platform/service-contract.md, docs/platform/onboarding.md, CHANGELOG.md (amendment) | As in "Docs (amendment)". |
+| packages/idp-gate/src/idp_gate/contract.py (amendment 2) | `_is_include_line`; backslash-on-include-line violation in `_Scanner.visit` (words not queued); `RecursionError` handler in `load_service`. (AC-7, AC-6) |
+| packages/idp-gate/src/idp_gate/conformance.py (amendment 2) | `_invalid` typed `Sequence[contract.Violation]`. (hardening) |
+| packages/idp-gate/tests/test_contract.py (amendment 2) | AC-7 validate test, nesting test, `OSError("boom")` case, direct `scan.include_words`. |
+| packages/idp-gate/tests/test_conformance.py (amendment 2) | AC-7 real-make conformance test, `too-deep` case, `raising=False` removed. |
+| docs/platform/service-contract.md, docs/platform/onboarding.md, CHANGELOG.md (amendment 2) | As in "Docs (amendment 2)". |
 
 Unchanged: root `Makefile`, root `pyproject.toml`, `.github/**`, `profiles.py`, `examples/minimal-service/**`,
 `find_examples`, `Result`, the CLI output format and exit codes.
@@ -263,5 +335,16 @@ directory` result line.
   unaffected.
 - Amendment risk: the second Makefile scan doubles static parse time per example. Bounded by the existing caps;
   negligible next to `make verify`.
+- Amendment 2 risk: a tenant Makefile that splits a long include list with `\` or uses a backslash in an include
+  path now fails `idp validate`. Detection: the new violation names the file. Mitigation: documented remedy (one
+  literal word per include, on one line, or several include lines). `examples/minimal-service` is unaffected (its
+  include has no backslash).
+- Amendment 2 residual risks (accepted, spec D5-D7):
+  - Any `$` include word stays unscanned and unpinned.
+  - The second scan is not compared with the validated one.
+  - A comment ending in `\` over-credits the next line's targets.
+  Follow-ups are listed in spec Q23.
+- Amendment 2 risk: `RecursionError` handling depends on the PyYAML loader in use (pure Python `SafeLoader` via
+  `safe_load`). Detection: the nesting test. Mitigation: T12 checks the behaviour first (spec A17).
 - Rollout: lands with the PR; CI runs `make verify` (includes `make conformance`). No migration.
 - Rollback: revert the PR; no data or config to undo.

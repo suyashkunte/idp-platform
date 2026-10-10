@@ -68,6 +68,36 @@ Facts checked for the amendment (current code on the branch):
   with the 3-argument signature; `test_conformance_reports_make_timeout` (IDP-19) and
   `test_make_verify_is_invoked_with_f_makefile` (IDP-22 AC-2) assert the exact argv.
 
+## Amendment 2 (2026-10-10, after review loop 2)
+T7-T9 were implemented (ba886b9, d74e0c2, 1e5827f); the IDP-17 include-word cap test was aligned in 3671157 (decision
+D4). Both reviewers independently found, and reproduced on GNU Make 3.81 (4.3 behaves the same), that AC-5 can be
+bypassed by literal include lines the scanner misreads:
+- MJ1: `-include gen\#.mk`. make unescapes the word to `gen#.mk`; the scanner records and pins `gen\#.mk`, so the
+  real file is neither pinned nor scanned (a static variant includes an outside symlink that is never scanned).
+- MJ2: backslash-newline continuation (`-include common.mk \` then `  gen.mk`). `_parsed_lines` does not join
+  continuations, so `gen.mk` is neither pinned nor scanned.
+
+The human chose to fail closed (consistent with D3 and with how `$`/glob words are handled): an include directive
+line containing a backslash is a validation violation. Added as AC-7. Why this suffices: make treats a line as an
+include only when it starts a logical line, so if a preceding line ends in `\`, make does not include it while the
+scanner still pins and scans it (over-pinning, the safe direction). The amendment also adds an AC-6 clarification for
+deeply nested `idp.yaml` (`RecursionError`), test and typing hardening (T13), and records the review items that are
+not fixed (D5-D7).
+
+Facts checked for amendment 2 (current code on the branch):
+- `_parsed_lines` strips comments at the first unescaped `#` (`_COMMENT = (?<!\\)#`), so `gen\#.mk` survives as
+  written, and lines are not joined. `_include_words(line)` splits on whitespace and drops words containing
+  `$*?[`; there is no backslash handling.
+- `contract.load_service` catches `UnicodeDecodeError` and `OSError` around `_load_yaml` but not `RecursionError`.
+  `yaml.safe_load` uses the pure-Python `SafeLoader`, whose composer recurses once per nesting level (the scanner
+  and parser are iterative), so `"[" * 100000` should raise `RecursionError` within a few hundred levels, long before
+  the input ends. ASSUMPTION A17, verified first in T12.
+- Test minors found in review: `test_makefile_scan_records_literal_include_words_as_written` and
+  `test_makefile_scan_caps_recorded_include_spellings` read `getattr(scan, "include_words", ...)`;
+  `test_conformance_fails_when_include_words_exceed_make_argument_limit` monkeypatches `MAX_ASSUME_OLD_BYTES` with
+  `raising=False`; `conformance._invalid` is annotated `list[contract.Violation] | tuple[contract.Violation, ...]`;
+  `test_unreadable_or_undecodable_idp_yaml_is_a_violation` has no case for an `OSError` whose `strerror` is None.
+
 ## Requirements
 - **AC-1** Given a service directory containing a valid `Makefile` and also a `GNUmakefile` or `makefile`, when I run `idp validate`, then it exits 1 and reports a violation naming the extra file.
   - "Extra file": a directory entry, found by listing the service directory (the directory of the validated
@@ -182,6 +212,9 @@ Facts checked for the amendment (current code on the branch):
     regenerates from a newer source, and (4) the `./gen.mk` spelling. Each must print `PASS`, leave a marker written
     by the validated `verify` recipe, leave no marker from the injected content, and leave `Makefile`/the include
     byte-for-byte unchanged (or still absent).
+  - Amendment 2: include words written with a backslash (escape or continuation) could make the pinned word differ
+    from the one make uses (review MJ1, MJ2); AC-7 rejects such lines during validation. The residual risk covers
+    every include word containing `$`, not only the profile include (D5).
 - **AC-6** (edge) Given an `idp.yaml` that cannot be read or is not valid UTF-8, when I run `idp validate` or `idp conformance`, then it is reported as a violation (`idp validate` exits 1; `idp conformance` prints a FAIL line for that example) instead of a traceback, and conformance continues with the remaining examples.
   - Added by the amendment (review M3, pre-existing since IDP-17).
   - `contract.load_service` catches `OSError` and `UnicodeDecodeError` around its `_load_yaml` call and returns
@@ -202,6 +235,41 @@ Facts checked for the amendment (current code on the branch):
   - Verified by `tmp_path` tests: non-UTF-8 bytes in `idp.yaml` (real file) and an unreadable file (monkeypatched
     `contract._load_yaml` raising `PermissionError`, so the test does not depend on running as non-root), for
     `idp validate` (text and `--json`) and for `idp conformance` with a second, valid example that still PASSes.
+  - Amendment 2 (clarification): an `idp.yaml` nested too deeply to parse (for example 100000 `[`) makes
+    `yaml.safe_load` raise `RecursionError`. `load_service` catches it around the same `_load_yaml` call and returns
+    `(None, [Violation("", "cannot parse: nesting too deep")])`, so `idp validate` prints
+    `idp.yaml: <root>: cannot parse: nesting too deep` (exit 1) and conformance FAILs that example and continues.
+    Only the parse is guarded; `validate_document` cannot see a deeper document than the parser produced (Q21).
+    Verified by a `tmp_path` test for `idp validate` and a third case in the conformance "continues" test. The test
+    must run in well under a second (no timing assertion; it stops at the recursion limit, not at the end of the
+    input). ASSUMPTION A17.
+  - Amendment 2 (hardening): the `idp validate` test gains an `OSError("boom")` case (`strerror` is None), expected
+    `cannot read: boom`.
+- **AC-7** (edge) Given a `Makefile`, or a file it includes, with an `include`/`-include`/`sinclude` line that contains a backslash (a line continuation such as `-include common.mk \` followed by `  gen.mk`, or an escape such as `-include gen\#.mk`), when I run `idp validate` or `idp conformance`, then validation reports a violation for that include line (`idp validate` exits 1; conformance prints `FAIL <x>: idp validate: ...`) and make is not run for that example.
+  - Added by amendment 2 (review MJ1, MJ2). It closes the AC-5 bypasses by failing closed rather than modelling
+    make's escape and continuation rules.
+  - Which lines: every line of every scanned file (the `Makefile` and its followed literal includes), after comment
+    stripping and `define` skipping (`_parsed_lines`), whose first whitespace-separated word is `include`,
+    `-include` or `sinclude`, and which contains `\` anywhere. Examples: a trailing `\` (continuation), `\#`, `\ `
+    (escaped space), `sub\x.mk`. Not flagged: an include line whose backslash is inside a stripped comment, and
+    backslashes on non-include lines.
+  - Violation: `path` `Makefile` (like the other scan problems), message
+    `include line in '<file>' uses a backslash (continuation or escape); write each include word literally on one line`,
+    where `<file>` is `Makefile` or the include word of the file containing the line (shown with `_shown`, so long
+    words are truncated). Text output example:
+    `idp.yaml: Makefile: include line in 'Makefile' uses a backslash (continuation or escape); write each include word literally on one line`.
+    ASSUMPTION A16, Q19.
+  - One violation per offending line, counted toward the existing `MAX_INCLUDE_PROBLEMS` (20) cap. The words of an
+    offending line are not queued, so they are neither scanned nor recorded in `include_words` (validation fails
+    anyway). Like the other scan problems, they replace the missing-target list (incomplete targets). Q20.
+  - Why it is enough (to be kept in the docs): make honours an include directive only at the start of a logical
+    line. If the line before an include line ends in `\`, make reads the include line as part of that line and does
+    not include anything, while the scanner still pins and scans the words: over-pinning only. And a continued or
+    escaped include line itself is now a violation, so no include word make sees can differ from the one pinned.
+  - Verified by a `tmp_path` validate test (parametrized: continuation, `\#` escape, an escape inside an included
+    file, and a negative case with a backslash only in a comment) and by a `needs_make` conformance test with the
+    two reviewer reproductions (MJ1, MJ2): each prints `FAIL examples/<x>: idp validate: 1 violation(s)` with the
+    detail line, exit 1, and the injected marker and generated file never appear (make not run).
 
 ## Edge cases and assumptions
 - Case-insensitive filesystems (macOS APFS default): `Makefile` and `makefile` cannot both exist. A directory holding
@@ -256,6 +324,18 @@ Facts checked for the amendment (current code on the branch):
 - ASSUMPTION A14: GNU make assume-old behaves as described for both existing and missing files (3.81 and 4.x);
   confirmed by the real-make tests.
 - ASSUMPTION A15: AC-6 messages as written; the violation path is `""` (shown as `<root>`), like invalid YAML.
+- Amendment 2 edge cases (AC-6, AC-7):
+  - A non-include line ending in `\` followed by an include line (`FOO = a \` then `include gen.mk`): make does not
+    include `gen.mk`; the scanner pins and scans it anyway (safe over-pinning, no violation).
+  - An include line ending in a comment that ends in `\` (`include a.mk # note \`): the comment is stripped before
+    the check, so there is no AC-7 violation. make continues the comment onto the next line, so a following
+    `include gen.mk` is not included by make but is pinned and scanned (over-pinning). Its targets are over-credited:
+    the pre-existing IDP-17 issue in D7.
+  - Words containing `$` (including `$$`) stay unscanned and unpinned (mn1, D5); AC-7 does not change that.
+  - `idp.yaml` nested just below the recursion limit parses normally and is validated as today.
+- ASSUMPTION A16: AC-7 message text and `path` `Makefile`; the offending line's words are not queued.
+- ASSUMPTION A17: `yaml.safe_load` raises `RecursionError` (not `yaml.YAMLError`) for `"[" * 100000` with the
+  pure-Python loader, quickly; T12 checks this first and stops to revise the spec if it does not.
 
 ## Non-functional requirements
 - No new dependencies: stdlib only (`os.listdir`, `pathlib`, `ast` in tests). `packages/idp-gate/pyproject.toml` and
@@ -291,6 +371,8 @@ Facts checked for the amendment (current code on the branch):
   `$(IDP_PROFILE_DIR)/defaults.mk` (residual risk, Q16); include files make finds through its default include
   directories (`/usr/include`, `-I`) rather than relative to the example; recursive `$(MAKE)` calls in recipes.
 - Amendment: making `idp validate` reject rules that target `Makefile` or an include (decision D3).
+- Amendment 2: modelling make's backslash escapes and continuations in the scanner (AC-7 rejects them instead);
+  the review items not fixed in D5-D7.
 
 ## Decisions (review loop 1, 2026-10-10, by the human)
 - D1: Not done: de-duplicating the `_case_sensitive` test helper that exists in both `test_contract.py` and
@@ -299,6 +381,22 @@ Facts checked for the amendment (current code on the branch):
 - D3: Not done: a scanner-level violation for rules whose target is `Makefile` or an include. A valid Makefile can
   already make `verify` a no-op, so `idp validate` is not a security boundary for tenant content; the conformance
   assume-old pinning (AC-5) is the guarantee that the validated file is what runs.
+
+## Decisions (review loop 2, 2026-10-10, by the human)
+- D4: The IDP-17 include-word cap test was aligned with the AC-5 spelling cap (3671157): 1025 spellings of
+  1024 or fewer files now fail validation with `too many include words (limit 1024)`. Before, the cap counted only
+  distinct normalised words.
+- D5: Not fixed (mn1): any include word containing `$` is an unscanned, unpinned path that a rule could generate or
+  remake, not only the profile's `$(IDP_PROFILE_DIR)/defaults.mk`. Reason: the ticket excludes include-following
+  changes, and examples/ is platform-owned and reviewed. Follow-up next to IDP-23 (Q16). The residual-risk note in
+  the docs covers every `$` include.
+- D6: Not fixed (mn2): conformance's second Makefile scan is not compared with the validated one (only its own
+  violations are checked). Reason: within the accepted TOCTOU window (examples/ is platform-owned; make reads the
+  files later anyway). Follow-up: a single scan shared by validation and conformance.
+- D7: Not fixed (pre-existing, IDP-17): a comment ending in `\` continues onto the next line in make, but the
+  scanner treats that next line as code, so a target defined there is credited although make never sees it.
+  Reason: make then fails at run time (`No rule to make target`), so this does not hide a failing `verify`.
+  Follow-up ticket.
 
 ## Open questions
 - Q1: AC-3 says `FAIL <x>: outside examples directory`. Every other result line shows the path built from DIR
@@ -354,6 +452,20 @@ Facts checked for the amendment (current code on the branch):
   Alternative: path `idp.yaml`.
 - Q18 (amendment): Should the schema-only `contract.validate_file` also turn read errors into violations? Proposed:
   no; the CLI does not use it, and AC-6 names `idp validate`/`idp conformance` only.
+- Q19 (amendment 2): AC-7 message text
+  `include line in '<file>' uses a backslash (continuation or escape); write each include word literally on one line`
+  with `path` `Makefile`? Proposed: yes (A16). It avoids putting a literal `\` in the message, which `--json` would
+  show doubled.
+- Q20 (amendment 2): Leave the words of an offending include line unqueued, so they are not scanned or pinned?
+  Proposed: yes; validation fails anyway, and the words may not be what make sees.
+- Q21 (amendment 2): Guard only the YAML parse against `RecursionError`, not `validate_document`? Proposed: yes;
+  the composer's recursion limit bounds the depth of any document that reaches validation, and the schema does not
+  descend into free-form content. If T12 shows otherwise, extend the guard to validation with the same message.
+- Q22 (amendment 2): Reject every backslash on an include line, including Windows-style `sub\x.mk`? Proposed: yes;
+  make treats `\` specially in file names, and one simple rule is easier to document and trust.
+- Q23 (amendment 2): Should the follow-ups for D5 (pin or forbid `$` includes), D6 (single shared scan) and D7
+  (comment continuation) be filed as one ticket next to IDP-23 or as three? Proposed: one ticket "make
+  include/continuation hardening", with three ACs.
 
 ## Traceability
 | AC | Planned tests |
@@ -363,4 +475,5 @@ Facts checked for the amendment (current code on the branch):
 | AC-3 | packages/idp-gate/tests/test_conformance.py::test_conformance_fails_symlinked_example_without_running_make, packages/idp-gate/tests/test_conformance.py::test_conformance_fails_example_resolving_outside_dir, packages/idp-gate/tests/test_conformance.py::test_conformance_accepts_real_examples_under_symlinked_dir |
 | AC-4 | packages/idp-gate/tests/test_conformance.py::test_check_example_parses_idp_yaml_once_for_validation_and_profile, packages/idp-gate/tests/test_conformance.py::test_conformance_module_uses_no_private_contract_members |
 | AC-5 | packages/idp-gate/tests/test_contract.py::test_makefile_scan_records_literal_include_words_as_written, packages/idp-gate/tests/test_contract.py::test_makefile_scan_caps_recorded_include_spellings, packages/idp-gate/tests/test_conformance.py::test_make_verify_pins_makefile_and_include_words_with_assume_old, packages/idp-gate/tests/test_conformance.py::test_conformance_fails_when_include_words_exceed_make_argument_limit, packages/idp-gate/tests/test_conformance.py::test_conformance_fails_when_makefile_changes_between_scans, packages/idp-gate/tests/test_conformance.py::test_make_cannot_remake_validated_makefiles |
-| AC-6 | packages/idp-gate/tests/test_contract.py::test_unreadable_or_undecodable_idp_yaml_is_a_violation, packages/idp-gate/tests/test_conformance.py::test_conformance_reports_unreadable_idp_yaml_and_continues |
+| AC-6 | packages/idp-gate/tests/test_contract.py::test_unreadable_or_undecodable_idp_yaml_is_a_violation, packages/idp-gate/tests/test_contract.py::test_deeply_nested_idp_yaml_is_a_violation, packages/idp-gate/tests/test_conformance.py::test_conformance_reports_unreadable_idp_yaml_and_continues |
+| AC-7 | packages/idp-gate/tests/test_contract.py::test_include_line_with_backslash_is_a_violation, packages/idp-gate/tests/test_conformance.py::test_conformance_rejects_backslash_include_lines_without_running_make |
