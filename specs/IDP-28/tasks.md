@@ -55,13 +55,101 @@ package tests green. Test names and exact expectations are in plan.md ("Tests").
   - Run `test_platform_examples_pass_conformance_within_60_seconds` and `test_conformance_fails_example_with_gnumakefile_bypass`
     (minimal-service must still PASS with the new profile pin).
   - (AC-4) Files: packages/idp-gate/src/idp_gate/conformance.py, packages/idp-gate/tests/test_conformance.py.
-- [ ] T7 Docs and wrap-up.
+- [ ] T7 Docs and wrap-up. Amendment 1: do this task last, after T14.
   - `docs/platform/service-contract.md`: logical lines, the separator violation, delete the continuation and D7
     limitations, the AC-7 rationale text, the conformance profile pin.
   - `docs/platform/onboarding.md`: the single scan, profile pin, `dynamic include ... cannot be pinned`, and the
     residual risk narrowed (the D5-D7 and define/continuation notes removed or adjusted).
   - The `conformance.py` module docstring.
   - An IDP-28 line under `[Unreleased]` / `### Changed` in `CHANGELOG.md`.
-  - Run `make verify` (includes `make conformance`) and `idp spec-trace IDP-28` (AC-1..AC-5); both green.
-  - (AC-1, AC-2, AC-3, AC-4, AC-5) Files: docs/platform/service-contract.md, docs/platform/onboarding.md, CHANGELOG.md,
+  - Amendment 1 additions:
+    - `service-contract.md`: continuations are collapsed as make does before directives are recognised; a continued
+      include line (also one starting with `\`) is an AC-7 violation; a rule line that starts with a blank, also
+      after a continuation, is not credited (spec Q18); define rules (`define NAME` and `override define NAME`
+      blocks; body lines closing like make; the AC-10 and AC-12 violations with message, reason and remedy); the
+      AC-11 character violation (set, message, remedy); `~` include words are outside the service directory.
+    - `onboarding.md`: `$(IDP_PROFILE_DIR)/<rest>` with a `..` segment or leading `/` cannot be pinned; residual
+      risks extended with the follow-ups (make's default include directories, `.RECIPEPREFIX`/`load`, unbounded make
+      output, TOCTOU/IDP-23, `make -pn` ADR).
+    - The `conformance.py` docstring and the CHANGELOG line mention AC-6..AC-14 in one or two clauses.
+  - Run `make verify` (includes `make conformance`) and `idp spec-trace IDP-28` (AC-1..AC-14); both green.
+  - (AC-1..AC-14) Files: docs/platform/service-contract.md, docs/platform/onboarding.md, CHANGELOG.md,
     packages/idp-gate/src/idp_gate/conformance.py.
+
+## Amendment 1 tasks (after review loop 1)
+Same rules as above: tests first and red for the expected reason (for real-make tests, red against the current
+`contract.py`/`conformance.py`, which still has the bypass), then the implementation, then the package tests green.
+Real-make tests use `needs_make`, explicit `os.utime` with `OLD_MTIME`/`NEW_MTIME` and no sleeps, and must hold on GNU
+Make 3.81 (local) and 4.x (CI). Test names and expectations are in plan.md ("Amendment 1", "Tests"). T7 runs after
+T14.
+
+- [ ] T8 Confirm make's reader in the scratchpad (not committed, no repo change).
+  - With the local GNU Make 3.81, confirm: (a) a line holding only `\` + `  endef` closes a define body, also with CRLF
+    (A7); (b) `override \` + `define Y` opens a block (A7, A12); (c) `override define Y` inside an `ifeq (a,b)` branch
+    is skipped up to its `endef` (A12); (d) `private define X = 1` and `export define X = 1` are not define blocks
+    on 3.81 (A12); (e) `ifeq (a,b)` / `define A` / `define B` / `endef` / `endif` / `-include gen.mk`: does make read
+    the include (A8)? (f) `define A` / `endef#c` / `x:` / `endef` in a taken branch: `endef#c` does not close (AC-10);
+    (g) `\` + `verify:` defines `verify` (Q18); (h) `-include ~/x.mk` reads `$HOME/x.mk` (A13).
+  - If (a), (b), (c) or (h) differs, stop and revise the spec. Record (e) and (g) for the human (they change only
+    docs wording). Optional: repeat on a 4.x if one is available.
+  - (AC-6, AC-8, AC-10, AC-12, AC-13) Files: none.
+- [ ] T9 Collapse continuations before directives.
+  - Add `test_continuations_are_collapsed_before_directives`, `test_continued_include_directive_is_a_backslash_violation`,
+    `test_override_continued_into_define_hides_its_body` and the collapsing case in
+    `test_many_continued_lines_are_joined_in_linear_time` (red).
+  - Add `needs_make` `test_continued_endef_cannot_hide_generated_include` (CRLF) and
+    `test_conformance_rejects_continued_include_directive_without_running_make` (red: PASS and `evil-ran`).
+  - Then implement `_collapse`, `_Line` (`code`, `raw_code`), the `_parsed_lines` switch, `visit` on `code` with the
+    AC-7 check on `raw_code`, and drop `_rule_names`' own collapse. Keep the existing define regexes in this task.
+  - Confirm all AC-1/AC-3 tests and `test_include_line_with_backslash_is_a_violation` (four cases) stay green.
+  - (AC-6, AC-7, AC-8) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
+    packages/idp-gate/tests/test_conformance.py.
+- [ ] T10 Define bodies like make; ambiguous body lines fail closed.
+  - Add `test_define_body_lines_close_and_nest_like_make` and `test_ambiguous_define_body_line_is_a_violation`
+    (red), and `needs_make` `test_non_nesting_define_body_line_cannot_hide_generated_include` (`define#`,
+    `override define B`; red: PASS and `evil-ran` for `define#`) and
+    `test_define_in_skipped_conditional_cannot_hide_generated_include` (red: PASS).
+  - Then implement `_body_line`, the boolean depth, the `"ambiguous"` problem and `_ambiguous_define_line`, and the
+    `_load_makefile`/`visit` plumbing for define problems.
+  - Rewrite `test_define_bodies_are_skipped_including_nested_ones` with accepted forms only (spec "Tests that
+    change"); its nested case moves to the AC-10 test.
+  - (AC-9, AC-10) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
+    packages/idp-gate/tests/test_conformance.py.
+- [ ] T11 Define lines with export, unexport or private fail closed.
+  - Add `test_define_with_export_unexport_or_private_is_a_violation` and the `override` linear-time case (red), and
+    `needs_make` `test_modifier_define_cannot_hide_generated_include` (`private define X = 1`,
+    `export define X = 1`; red: PASS, with `evil-ran` on 3.81).
+  - Then implement `_DEFINE_LINE` (replacing `_DEFINE_START`/`_DEFINE_END`), the `"modifier"` problem and
+    `_modifier_define`.
+  - Move the `export define EXPORTED =` case out of `test_define_bodies_are_skipped_including_nested_ones` into the
+    new test. Confirm `test_variable_named_define_does_not_start_a_define_block` stays green unchanged.
+  - (AC-12) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
+    packages/idp-gate/tests/test_conformance.py.
+- [ ] T12 Characters make reads differently (incl. NUL).
+  - Add `test_character_make_reads_differently_is_a_violation` (parameters computed from `str.isspace()` plus the
+    C0 controls), `test_spaces_tabs_and_crlf_are_accepted` (red), and `needs_make`
+    `test_conformance_rejects_characters_make_reads_differently_without_running_make` (`a.mk\x1fb.mk`, U+00A0,
+    `define\x1fX = 1`; red: PASS and the injected content runs).
+  - Then implement `_FOREIGN_CHARACTER`, `_foreign_character` and the check in `_load_makefile`; fix the
+    `_FOREIGN_SEPARATOR` comment (m2).
+  - Update `test_nul_byte_in_include_word_is_a_violation_not_a_traceback` to the AC-11 message (spec "Tests that
+    change"). Confirm every AC-2 test stays green unchanged.
+  - (AC-11) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
+    packages/idp-gate/tests/test_conformance.py.
+- [ ] T13 Include words starting with `~`.
+  - Add `test_include_word_starting_with_tilde_is_a_violation` (red) and `needs_make`
+    `test_tilde_include_cannot_read_home_file` (`HOME` monkeypatched to `tmp_path/home`; red: PASS and `evil-ran`).
+  - Then add the `~` check to `_lexically_outside`.
+  - (AC-13) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/tests/test_contract.py,
+    packages/idp-gate/tests/test_conformance.py.
+- [ ] T14 Profile words outside the profile directory; shared display helper.
+  - Add the AC-14 mark and the four new cases to `test_unpinnable_dynamic_include_fails_without_running_make`, and
+    `needs_make` `test_profile_dir_include_cannot_read_outside_profile_dir` (red: PASS and `evil-ran`). Change
+    `test_profile_dir_include_is_pinned_with_resolved_path` to `$(IDP_PROFILE_DIR)/sub/extra.mk`.
+  - Then extend `_profile_names` (`..` segment, leading `/`).
+  - Minors: rename `contract._shown` to public `contract.shown` and update its call sites; delete
+    `conformance._shown` and use `contract.shown` (m8; `test_conformance_module_uses_no_private_contract_members`
+    and the `long-word-truncated`/`quote-in-word` cases stay green); add the m3 comment at the `load_service` call
+    site.
+  - (AC-14) Files: packages/idp-gate/src/idp_gate/contract.py, packages/idp-gate/src/idp_gate/conformance.py,
+    packages/idp-gate/tests/test_conformance.py.

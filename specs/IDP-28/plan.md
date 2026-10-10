@@ -246,3 +246,182 @@ None (CLI only). Operator signals: the new validate violation line and the new c
   Mitigation: none outside the repo (internal package).
 - Rollout: lands with the PR. CI runs `make verify` (includes `make conformance`). No migration.
 - Rollback: revert the PR. No data or config to undo.
+
+## Amendment 1 (2026-10-10, after review loop 1): AC-6..AC-14
+T1-T6 are done (265eefb, 3a68006, 31fea1b, 864e721, 1959fa4, 429b6a2). Agent work only; no protected path, no new
+dependency, caps unchanged. Spec decisions: Q2, Q7, Q15, Q16 superseded; Q18-Q28 new. The design rule behind every
+define change (spec "Amendment 1 edge cases"): the scanner may over-scan, but never hides a line any make version
+reads in any conditional branch.
+
+### Scanner (`contract.py`)
+1. **Collapsed logical lines (AC-6, AC-7, AC-8)**:
+   - New `_collapse(raw: str) -> str` (make's `collapse_continuations`, A7). Split `raw` on `"\n"` (the joins made by
+     `_logical_lines`; each part except the last ends in an odd backslash run). For each part except the last:
+     `n = len(part) - len(part.rstrip("\\"))`, keep `part[:-n] + "\\" * (n // 2)`, and if `n // 2 == 0` also
+     `rstrip(" \t")`. Strip `" \t"` from the start of every part after the first. Join the parts with one space.
+     Linear: each part is stripped and joined once. A raw line without `"\n"` is returned unchanged (fast path).
+   - `_parsed_lines(text)` now returns `tuple[list[_Line], list[str]]`:
+     - `_Line` is a small frozen dataclass (or `NamedTuple`) `code: str` (collapsed, comment-stripped) and
+       `raw_code: str` (uncollapsed, comment-stripped; only for the IDP-22 AC-7 check);
+     - the second item lists define problems in line order (`"ambiguous"` for AC-10, `"modifier"` for AC-12).
+   - For each raw logical line: `collapsed = _collapse(raw)`, `code = _COMMENT.split(collapsed, 1)[0]`,
+     `raw_code = _COMMENT.split(raw, 1)[0]` (same comment position: collapsing only changes text at `\`+newline,
+     where the character before a `#` is a newline or a space, never `\`).
+   - `_rule_names(line)` drops its `replace("\\\n", " ")` (the input is already collapsed). A collapsed line starting
+     with a blank is still not credited (spec Q18).
+   - `_Scanner.visit` iterates `_Line`s: `_rule_names(l.code)`; include line test on `l.code`; IDP-22 AC-7 check
+     `"\\" in l.raw_code`; `_dynamic_include_words(l.code)` and `_include_words(l.code)`.
+2. **Define tracking (AC-8, AC-9, AC-10, AC-12)**, inside `_parsed_lines`; depth is a bool (`in_define`):
+   - In a body: `_body_line(collapsed) -> Literal["end", "ambiguous", "text"]`:
+     - tab-prefixed: `p = collapsed.lstrip(" \t")`; `"ambiguous"` if `p == "endef"` or `p[:5] == "endef"` and
+       `p[5:6] in {" ", "\t", "#"}`; else `"text"`;
+     - otherwise `p = collapsed.lstrip(" \t")`; `"end"` if `p == "endef"` or (`p[:5] == "endef"` and
+       `p[5] in " \t"`); `"ambiguous"` if `p[:6] == "endef#"`, or `p == "define"`, or (`p[:6] == "define"` and
+       `p[6] in " \t"`); else `"text"`.
+     - `"end"` leaves the body; `"ambiguous"` appends `"ambiguous"` to the problems and stays in the body (no
+       nesting count); body lines are never emitted.
+   - At depth 0, non-tab raw line: `_DEFINE_LINE = re.compile(r"[ \t]*((?:(?:override|export|unexport|private)[ \t]+)*)define(?:[ \t]|$)(?![ \t]*(?::{1,3}|[+?!])?=)")`
+     matched on `code`. No match: an ordinary line. Modifiers (`group(1).split()`) empty or `["override"]`: enter the
+     body. Anything else: append `"modifier"` to the problems and emit the line as an ordinary line (no block).
+   - Tab-prefixed lines at depth 0 never open a block (unchanged).
+   - `_DEFINE_START` and `_DEFINE_END` are replaced by `_DEFINE_LINE` and `_body_line`.
+3. **Characters make reads differently (AC-11)**:
+   - `_FOREIGN_CHARACTER = re.compile("[\x00-\x08\x0e-\x1b\x1f\xa0  -   　]")` and
+     `_foreign_character(name, match) -> Violation` with the AC-11 message (`U+XXXX`).
+   - `_load_makefile`: after the `_FOREIGN_SEPARATOR` check, `if (m := _FOREIGN_CHARACTER.search(text)): return
+     _foreign_character(name, m)`.
+   - Fix the `_FOREIGN_SEPARATOR` comment (m2): it rejects line separators make does not use (make splits on LF only
+     and drops a CR before LF) so that no line boundary is ambiguous; it is not about `splitlines()` any more.
+   - `_locate`'s NUL guard stays (spec Q26).
+4. **Define problems become violations (AC-10, AC-12)**: `_load_makefile(resolved, name)` returns
+   `tuple[list[_Line], list[Violation]] | Violation`. It maps `"ambiguous"` to `_ambiguous_define_line(name)` and
+   `"modifier"` to `_modifier_define(name)` (AC-10/AC-12 messages, `path` `Makefile`). `visit` reports each through
+   `self.problem` (cap 20) and then scans the lines.
+5. **`~` include words (AC-13)**: `_lexically_outside(word, root)` returns True also when `word.startswith("~")`.
+6. **Public display helper (spec Q28, m8)**: rename `_shown` to `shown` and update its contract call sites
+   (`_cannot_read`, `_outside`, `_backslash_include`, `_foreign_separator`, the size message and the new messages).
+
+### Conformance (`conformance.py`)
+7. **Profile words (AC-14)**: in `_profile_names`, a word is also unpinnable when `".." in rest.split("/")` or
+   `rest.startswith("/")`. Docstring updated.
+8. **Minors**: delete `conformance._shown`; use `contract.shown(unpinnable)` (m8). At the `load_service` call site,
+   a comment: the scan is empty only when the Makefile was not scanned, which always comes with violations, so it is
+   never used below (m3). No `assert` (bandit B101).
+9. Module docstring: collapsed logical lines, define rules, the new character violation, `~` words, `..`/absolute
+   profile words, and the follow-up residual risks (default include path, `.RECIPEPREFIX`/`load`, TOCTOU). Done in T7.
+
+### Tests (new tests tagged `@pytest.mark.ac("IDP-28:AC-n")`, written red-first)
+`packages/idp-gate/tests/test_contract.py` (reuse `_scan_text`, `_write_idp`, `_write_makefile`, `_run`,
+`_make_messages`, `ALL_TARGETS`, `BACKSLASH_INCLUDE`, `FOREIGN_SEPARATOR`):
+- `test_continuations_are_collapsed_before_directives` (AC-6), parametrized:
+  - the AC-6 layout (`define Y`, `body`, `\`, `  endef`, `-include gen.mk`, `gen.mk:`) in LF and in CRLF:
+    `include_words == ("gen.mk",)`, `"gen.mk" in targets`, no violations;
+  - `define \` + `  Y` / `inside:` / `endef` / `after:` credits `after` only (the collapsed `define Y` opens a block);
+  - `X = a\\\` + `-include gen.mk` (three backslashes: one literal backslash kept, then a continuation) records no
+    include word and gives no violation (one assignment line, as in make);
+  - `lint  \` + `  verify:` credits `lint` and `verify` (blanks on both sides of the continuation collapse to one
+    space).
+- `test_continued_include_directive_is_a_backslash_violation` (AC-7), parametrized LF, CRLF and `\` + `   -include
+  gen.mk` (leading blanks): exact stdout `idp.yaml: Makefile: include line in 'Makefile' {BACKSLASH_INCLUDE}`,
+  exit 1, `gen.mk` not in `include_words`; negative case `X = \` + `-include gen.mk`: exit 0 and `include_words == ()`.
+- `test_override_continued_into_define_hides_its_body` (AC-8), parametrized LF and CRLF (`override \` + `define Y` /
+  `verify:` / `endef`) and the Q18 case (`\` + `verify:`): every other required target defined; exact stdout
+  `idp.yaml: Makefile: missing required target 'verify'`, exit 1.
+- `test_define_body_lines_close_and_nest_like_make` (AC-9), parametrized body lines `define#`, `define#x`,
+  `override define B`, `export define B`, `\tdefine B`, `defineX` and closing lines `endef`, `  endef`, `endef # done`,
+  one CRLF case: `define A` / `<body>` / `inside:` / `<closing>` / `after:` credits `after` only and gives no
+  violation.
+- `test_ambiguous_define_body_line_is_a_violation` (AC-10), parametrized `define B`, `define`, `define # c`,
+  `endef#c`, `\tendef`, `\tendef#c`, a CRLF case and an in-include case (`include common.mk`, the body in
+  `common.mk`): exact stdout `idp.yaml: Makefile: define body in '<file>' has a line make reads differently in
+  skipped conditional branches (...); remove it`, exit 1. Plus one scanner assertion that two offending lines give two
+  violations.
+- `test_character_make_reads_differently_is_a_violation` (AC-11): parameters computed at import:
+  `[c for c in map(chr, range(0x110000)) if c.isspace() and c not in " \t\n\r\x0b\x0c\x1c\x1d\x1e\x85  "]`
+  plus `chr(0)`..`chr(8)` and `chr(0x0e)`..`chr(0x1b)`, each placed inside a word after `lint:`. Exact stdout
+  `idp.yaml: Makefile: 'Makefile' contains a control or space character make reads differently (U+XXXX); use only
+  spaces, tabs and LF or CRLF line endings`, exit 1. One in-include case (`'common.mk'`, U+00A0) and one `--json`
+  case.
+- `test_spaces_tabs_and_crlf_are_accepted` (AC-11): a CRLF Makefile with tabs and runs of spaces between words is
+  `valid`, exit 0; DEL (U+007F) and U+FEFF inside a recipe line are accepted too.
+- `test_define_with_export_unexport_or_private_is_a_violation` (AC-12), parametrized rejected lines
+  (`export define X = 1`, `private define X = 1`, `unexport define X`, `override export define X`,
+  `export override define X`, CRLF `private define X = 1`) with exact stdout, exit 1; accepted lines (`define X`,
+  `override define X`, each followed by `endef`; `export define ?= 3`; `define X = 1` / `endef`) with exit 0.
+- `test_include_word_starting_with_tilde_is_a_violation` (AC-13): `_make_messages` gives
+  `["include '~/evil.mk' is outside the service directory"]` for `-include ~/evil.mk`, likewise `~user/x.mk` and
+  `~`; `-include a~b.mk` is valid and recorded in `include_words`.
+- Changed (spec "Tests that change"): `test_define_bodies_are_skipped_including_nested_ones` (accepted forms only);
+  `test_nul_byte_in_include_word_is_a_violation_not_a_traceback` (AC-11 message).
+- Linear-time cases: `test_many_continued_lines_are_joined_in_linear_time` gains `"\\\n  x" * 200_000` (collapsing);
+  `test_long_lines_without_colon_are_parsed_in_linear_time` gains `"override " * 100_000 + "x\n"`.
+
+`packages/idp-gate/tests/test_conformance.py` (reuse `_write_example`, `_append_to_makefile`, `_temporary_profile`,
+`_fake_make_on_path`, `_recording_popen`, `OLD_MTIME`, `NEW_MTIME`, `EVIL_INCLUDE`, `GENERATE_EVIL`,
+`STRIPPED_MAKE_VARS`, `needs_make`). Every `needs_make` test: `os.utime(Makefile, (OLD_MTIME, OLD_MTIME))`, the
+stripped make variables deleted, no sleeps; a shared helper `_assert_rejected_before_make(directory, capsys, code)`
+may assert `FAIL ...: idp validate: 1 violation(s)`, the detail line, exit 1, and only `Makefile`/`idp.yaml` (plus
+any test-written source) in the directory.
+- `test_continued_endef_cannot_hide_generated_include` (AC-6, `needs_make`): the AC-6 layout written with
+  `write_bytes` and CRLF line endings (the recipe line too; make strips the CR before LF). Expected PASS,
+  `validated-ran`, no `evil-ran`, no `gen.mk`.
+- `test_conformance_rejects_continued_include_directive_without_running_make` (AC-7, `needs_make`): `\` +
+  `-include gen.mk` + `gen.mk:` + `{GENERATE_EVIL}gen.mk`. Expected FAIL with the AC-7 detail line.
+- `test_non_nesting_define_body_line_cannot_hide_generated_include` (AC-9, `needs_make`, parametrized `define#` and
+  `override define B`): `define A` / `<line>` / `endef` / `-include gen.mk` / the generating rule. Expected PASS,
+  `validated-ran`, no `evil-ran`, no `gen.mk`.
+- `test_define_in_skipped_conditional_cannot_hide_generated_include` (AC-10, `needs_make`): `ifeq (a,b)` /
+  `define A` / `define B` / `endef` / `endif` / `-include gen.mk` / the generating rule. Expected FAIL with the AC-10
+  detail line.
+- `test_conformance_rejects_characters_make_reads_differently_without_running_make` (AC-11, `needs_make`,
+  parametrized): `-include a.mk\x1fb.mk` plus the rule `a.mk\x1fb.mk:` with a recipe writing `EVIL_INCLUDE` to `'$@'`;
+  the same with U+00A0; `define\x1fX = 1` plus the AC-1 `gen.mk` attack. Files written with `encoding="utf-8"`.
+  Expected FAIL with the AC-11 detail line and no generated file.
+- `test_modifier_define_cannot_hide_generated_include` (AC-12, `needs_make`, parametrized `private define X = 1`
+  and `export define X = 1`, each followed by the `gen.mk` attack). Expected FAIL with the AC-12 detail line.
+- `test_tilde_include_cannot_read_home_file` (AC-13, `needs_make`): `monkeypatch.setenv("HOME", str(tmp_path /
+  "home"))`, `home/evil.mk` holding `EVIL_INCLUDE`, the example appends `-include ~/evil.mk`. Expected FAIL with
+  `Makefile: include '~/evil.mk' is outside the service directory`, no `evil-ran`.
+- `test_profile_dir_include_cannot_read_outside_profile_dir` (AC-14, `needs_make`): `_temporary_profile`,
+  `tmp_path/outside/evil.mk` holding `EVIL_INCLUDE`, the example appends
+  `-include $(IDP_PROFILE_DIR)/../outside/evil.mk`. Expected stdout
+  `FAIL examples/<x>: dynamic include '$(IDP_PROFILE_DIR)/../outside/evil.mk' cannot be pinned` and the summary,
+  exit 1, no `evil-ran`.
+- `test_unpinnable_dynamic_include_fails_without_running_make` gains `@pytest.mark.ac("IDP-28:AC-14")` and the cases
+  `dotdot-segment` (`$(IDP_PROFILE_DIR)/../x.mk`), `nested-dotdot` (`$(IDP_PROFILE_DIR)/a/../../x.mk`),
+  `bare-dotdot` (`$(IDP_PROFILE_DIR)/..`) and `absolute-rest` (`$(IDP_PROFILE_DIR)//etc/x.mk`).
+- Changed: `test_profile_dir_include_is_pinned_with_resolved_path` pins `$(IDP_PROFILE_DIR)/sub/extra.mk` instead of
+  `../shared/extra.mk`.
+- Unchanged and still green: every IDP-22 and IDP-28 AC-1..AC-5 test not listed above,
+  `test_conformance_module_uses_no_private_contract_members` (now satisfied by the public `contract.shown`),
+  `tests/conformance/test_examples.py` (minimal-service PASSes).
+
+### Changes (amendment 1)
+| File | Change |
+|------|--------|
+| packages/idp-gate/src/idp_gate/contract.py | `_collapse`; `_Line`; `_parsed_lines` returns lines and define problems; `_DEFINE_LINE` and `_body_line` replace `_DEFINE_START`/`_DEFINE_END`; `_rule_names` without its own collapse; `visit` uses `code`/`raw_code` and reports define problems; `_FOREIGN_CHARACTER`, `_foreign_character`, the check in `_load_makefile`, corrected `_FOREIGN_SEPARATOR` comment; `_ambiguous_define_line`, `_modifier_define`; `~` in `_lexically_outside`; `_shown` renamed `shown`. (AC-6..AC-13, Q28) |
+| packages/idp-gate/src/idp_gate/conformance.py | `_profile_names` rejects `..` segments and a leading `/`; `_shown` removed in favour of `contract.shown`; m3 comment; module docstring (T7). (AC-14, Q28) |
+| packages/idp-gate/tests/test_contract.py | AC-6..AC-13 tests; two linear-time cases; the two changed IDP-17 tests. |
+| packages/idp-gate/tests/test_conformance.py | AC-6, AC-7, AC-9..AC-14 real-make tests; AC-14 cases and mark on the rejection test; the changed pin test. |
+| docs/platform/service-contract.md, docs/platform/onboarding.md, CHANGELOG.md | T7, extended to the amendment (spec Q17). |
+
+### Interfaces and data (amendment 1)
+- `idp validate` adds three violation kinds (AC-10, AC-11, AC-12). `~` include words reuse the IDP-17 "outside the
+  service directory" message. Target crediting and include following change only where make and the scanner
+  disagreed (collapsed continuations, define bodies).
+- `idp conformance` keeps its result reasons; more words give `dynamic include '<word>' cannot be pinned`.
+- Python API: `contract.shown` becomes public (was `_shown`); `MakefileScan`, `load_service`, `check_make_contract`
+  and `makefile_targets` signatures are unchanged.
+
+### Risks (amendment 1)
+- Risk: make's reader differs from A7/A8/A12/A13 on 3.81 or 4.x. Detection: T8's scratchpad checks (3.81) and the
+  real-make tests in CI (4.x). Mitigation: AC-10 and AC-12 fail closed whatever the result; if A7 or A12 is wrong, stop
+  and revise the spec.
+- Risk: a tenant Makefile with nested defines, `export define`, a raw control byte (for example ESC in a recipe) or a
+  non-breaking space now fails `idp validate`. Detection: the message names the file and the character or line kind.
+  Mitigation: documented remedies; spec Q19, Q20 and Q22 record the alternatives.
+- Risk: the define rules over-scan (for example `define := 1` on 3.81, or a modifier define's body), which can credit a
+  target make never defines. Mitigation: make then fails at run time (`No rule to make target`), and conformance
+  reports it; it never hides an include.
+- Risk: residual reader features (`.RECIPEPREFIX`, `load`, default include directories) stay unmodelled. Mitigation:
+  follow-ups (spec "Out of scope / follow-ups"); examples are platform-owned and reviewed.
