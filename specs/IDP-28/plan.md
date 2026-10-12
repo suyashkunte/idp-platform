@@ -449,3 +449,6 @@ Deviations from the steps above (spec.md unchanged); each has regression tests t
 - `define $(...)` (proposed fix not applied): real make 3.81, 4.3 and 4.4.1 all open a define block for
   `define $(N) = 1` (4.x warns; an empty name is fatal), so `_DEFINE_LINE` is unchanged; tests pin that behaviour.
 - `_load_makefile(resolved, name, limit)` builds at most `limit` define violations (security m1).
+- Glob repeats (N1, confirmation check): `queue` remembers skipped inside-glob spellings in a set (repeats O(1)), and
+  `_lexically_outside(word)` is string-only (`~` after leading `./` runs, `os.path.isabs`, `os.path.normpath(word)`
+  equal to `..` or starting with `../`), equivalent to the pathlib check for a root that is not `/`.

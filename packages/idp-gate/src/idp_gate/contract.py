@@ -283,12 +283,13 @@ def _foreign_separator(name: str, match: re.Match[str]) -> Violation:
     )
 
 
-def _lexically_outside(word: str, root: Path) -> bool:
+def _lexically_outside(word: str) -> bool:
     """Absolute words, `..` escapes and words make tilde-expands (`~`, `~user`, also after leading `./` runs) are
-    rejected before touching the filesystem."""
+    rejected before touching the filesystem. String-only (no pathlib objects): cheap enough for every distinct word."""
     if _LEADING_DOT_SLASH.sub("", word).startswith("~"):
         return True
-    return Path(word).is_absolute() or not Path(os.path.normpath(root / word)).is_relative_to(root)
+    normalised = os.path.normpath(word)
+    return os.path.isabs(word) or normalised == ".." or normalised.startswith("../")
 
 
 def _locate(path: Path, word: str | None, root: Path) -> Path | Violation | None:
@@ -335,6 +336,7 @@ class _Scanner:
     problems: list[Violation] = field(default_factory=list)
     pending: deque[tuple[Path, str | None]] = field(default_factory=deque)
     outside: set[str] = field(default_factory=set)
+    globs: set[str] = field(default_factory=set)
     spellings: list[str] = field(default_factory=list)
     seen_spellings: set[str] = field(default_factory=set)
     dynamic: list[str] = field(default_factory=list)
@@ -357,13 +359,14 @@ class _Scanner:
         is reported at once and never recorded or queued. Other glob words are skipped. Other words are recorded and
         queued as written: `visit` dedupes files by real path, as make reads `link/../b.mk` through the link. Stop
         past MAX_INCLUDE_WORDS distinct spellings."""
-        if self.stopped or word in self.seen_spellings or word in self.outside:
+        if self.stopped or word in self.seen_spellings or word in self.outside or word in self.globs:
             return
-        if _lexically_outside(word, self.root):
+        if _lexically_outside(word):
             self.outside.add(word)  # bounded: the problem cap stops the scan after MAX_INCLUDE_PROBLEMS
             self.problem(_outside(word))
             return
-        if any(c in word for c in "*?["):  # globs are not followed (IDP-17)
+        if any(c in word for c in "*?["):  # globs are not followed (IDP-17); remembered so repeats are O(1)
+            self.globs.add(word)
             return
         if len(self.seen_spellings) >= MAX_INCLUDE_WORDS:
             self.stop(f"too many include words (limit {MAX_INCLUDE_WORDS})")

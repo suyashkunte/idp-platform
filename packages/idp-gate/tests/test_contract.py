@@ -1741,3 +1741,18 @@ def test_define_problems_past_the_cap_stop_the_scan(tmp_path: Path) -> None:
 
     assert len(scan.violations) == limit + 1
     assert scan.violations[-1] == contract.Violation("Makefile", f"too many include problems (limit {limit})")
+
+
+@pytest.mark.ac("IDP-28:AC-13")
+@pytest.mark.parametrize(
+    "words",
+    [" a*" * 300_000, "".join(f" g{i}*" for i in range(125_000))],
+    ids=["repeated-glob", "distinct-globs"],
+)
+def test_glob_include_words_inside_service_are_skipped_in_linear_time(tmp_path: Path, words: str) -> None:
+    # About 1 MiB of glob words: each must be skipped with an O(1) lookup or a cheap string check.
+    scan = _scan_text(tmp_path, "-include" + words + "\nlint:\n")
+
+    assert scan.violations == ()
+    assert scan.include_words == ()
+    assert scan.targets == {"lint"}
