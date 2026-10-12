@@ -433,3 +433,19 @@ any test-written source) in the directory.
   reports it; it never hides an include.
 - Risk: residual reader features (`.RECIPEPREFIX`, `load`, default include directories) stay unmodelled. Mitigation:
   follow-ups (spec "Out of scope / follow-ups"); examples are platform-owned and reviewed.
+
+## Review loop 2 fixes (2026-10-12)
+Deviations from the steps above (spec.md unchanged); each has regression tests tagged with the AC it protects.
+- Raw tab (AC-9): `_parsed_lines` tests the recipe tab on the raw logical line, not the collapsed one (make checks
+  `line[0]` before `collapse_continuations`; `\t\` + `define X` after a rule is a recipe line). Body lines keep the
+  collapsed test (`do_define` collapses first).
+- Outside words in `queue` (AC-13, replaces the T13 note): a lexically outside word (also a glob) is reported at
+  once through `problem` and remembered in a set, never recorded or queued; repeats are O(1). Fixes a normalised
+  duplicate (`sub/../~/x.mk`) hiding `~/x.mk` and the per-repeat `_lexically_outside` cost. `_locate` drops its now
+  unreachable lexical check.
+- Spelling-only dedupe (IDP-17 symlink alias): the normalised-word set is gone; words are queued once per spelling
+  (still capped at MAX_INCLUDE_WORDS) and `visit` dedupes files by real path, so `link/../b.mk` is scanned as make
+  reads it.
+- `define $(...)` (proposed fix not applied): real make 3.81, 4.3 and 4.4.1 all open a define block for
+  `define $(N) = 1` (4.x warns; an empty name is fatal), so `_DEFINE_LINE` is unchanged; tests pin that behaviour.
+- `_load_makefile(resolved, name, limit)` builds at most `limit` define violations (security m1).

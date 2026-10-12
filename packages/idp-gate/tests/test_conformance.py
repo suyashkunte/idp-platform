@@ -1334,3 +1334,91 @@ def test_profile_dir_include_cannot_read_outside_profile_dir(
     )
     assert code == 1
     assert sorted(p.name for p in directory.iterdir()) == ["Makefile", "idp.yaml"]
+
+
+# --- IDP-28 review loop 2: real make reads what the scanner validated ---------------------------------------------
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-9")
+def test_tab_continued_define_after_rule_cannot_hide_generated_include(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # After a rule, make reads raw `\t\` + `define X` as a recipe line (tab tested before collapsing), then the include.
+    directory = _write_example(tmp_path / "examples", "tab-define", verify="@touch validated-ran")
+    _append_to_makefile(directory, "unused:\n\t\\\ndefine X\n" + GEN_ATTACK)
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/tab-define\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert _files(directory) == ["Makefile", "idp.yaml", "validated-ran"]
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-9")
+def test_define_with_variable_reference_name_keeps_its_body_unread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 3.81, 4.3 and 4.4.1 open a define block for `define $(NAME) = 1`: the include in its body is never read, so
+    # nothing is generated even though the scanner (which skips the body too) does not pin gen.mk.
+    directory = _write_example(tmp_path / "examples", "dollar-define", verify="@touch validated-ran")
+    _append_to_makefile(directory, "NAME := n\ndefine $(NAME) = 1\n" + GEN_ATTACK + "endef\n")
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/dollar-define\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert _files(directory) == ["Makefile", "idp.yaml", "validated-ran"]
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-13")
+@pytest.mark.parametrize(
+    ("words", "outside"),
+    [("sub/../~/x.mk ~/x.mk", "~/x.mk"), ("~/x.m?", "~/x.m?")],
+    ids=["normalising-alias", "glob"],
+)
+def test_tilde_include_hidden_by_alias_or_glob_cannot_read_home_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], words: str, outside: str
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "x.mk").write_text(EVIL_INCLUDE)
+    monkeypatch.setenv("HOME", str(home))
+    directory = _write_example(tmp_path / "examples", "tilde", verify="@touch validated-ran")
+    _append_to_makefile(directory, f"-include {words}\n")
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/tilde: idp validate: 1 violation(s)\n"
+        f"    Makefile: include '{outside}' is outside the service directory\n"
+        "conformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert _files(directory) == ["Makefile", "idp.yaml"]  # make never ran (and never read $HOME/x.mk)
+
+
+@needs_make
+@pytest.mark.ac("IDP-22:AC-5")
+def test_include_through_symlink_alias_is_scanned_and_pinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # make reads `link/../b.mk` as `sub/b.mk` (link -> sub/deep); its `-include gen.mk` must be scanned and pinned.
+    directory = _write_example(tmp_path / "examples", "alias", verify="@touch validated-ran")
+    (directory / "sub" / "deep").mkdir(parents=True)
+    (directory / "link").symlink_to(Path("sub") / "deep")
+    (directory / "b.mk").write_text("B := 1\n")
+    (directory / "sub" / "b.mk").write_text(GEN_ATTACK)
+    _append_to_makefile(directory, "-include b.mk\n-include link/../b.mk\n")
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/alias\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert _files(directory) == ["Makefile", "b.mk", "idp.yaml", "link", "sub", "validated-ran"]

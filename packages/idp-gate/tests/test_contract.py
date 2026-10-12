@@ -1633,3 +1633,111 @@ def test_tilde_inside_include_word_is_a_literal_word(
 
     assert _validate(tmp_path, monkeypatch, capsys) == ("idp.yaml: valid (idp-service.v1.json)\n", 0)
     assert contract.makefile_targets(makefile).include_words == ("a~b.mk", "sub/../~/x.mk")
+
+
+# --- IDP-28 review loop 2: regressions found after T14 -------------------------------------------------------------
+
+
+@pytest.mark.ac("IDP-28:AC-9")
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_tab_continued_into_define_after_rule_is_a_recipe_line(tmp_path: Path, newline: str) -> None:
+    # make decides recipe-or-directive on the raw line (tab first), before collapsing: `\t\` + `define X` after a rule
+    # is a recipe line, so the lines after it are read (collapsed it would look like ` define X`).
+    lines = ["unused:", "\t\\", "define X", "-include gen.mk", "after:"]
+    scan = _scan_text(tmp_path, "".join(line + newline for line in lines))
+
+    assert scan.targets == {"unused", "after"}
+    assert scan.include_words == ("gen.mk",)
+    assert scan.violations == ()
+
+
+@pytest.mark.ac("IDP-28:AC-9")
+@pytest.mark.parametrize(
+    "line",
+    ["define $(NAME) = 1", "override define $(NAME) = 1", "define ${NAME} = 1", "define $(NAME)"],
+    ids=["dollar-paren", "override-dollar-paren", "dollar-brace", "dollar-no-operator"],
+)
+def test_define_with_variable_reference_name_opens_a_block(tmp_path: Path, line: str) -> None:
+    # GNU make 3.81, 4.3 and 4.4.1 all open a define block here (4.x warns about extra text after `define`; an empty
+    # name is fatal), so the body is not read: the scanner skips it too.
+    scan = _scan_text(tmp_path, f"NAME := n\n{line}\n-include gen.mk\ninside:\nendef\nafter:\n")
+
+    assert scan.targets == {"after"}
+    assert scan.include_words == ()
+    assert scan.violations == ()
+
+
+@pytest.mark.ac("IDP-28:AC-13")
+@pytest.mark.parametrize(
+    ("words", "outside"),
+    [
+        ("sub/../~/x.mk ~/x.mk", "~/x.mk"),
+        ("~/x.mk sub/../~/x.mk", "~/x.mk"),
+        ("sub/../~/x.mk ./~/x.mk", "./~/x.mk"),
+        ("./~/x.mk sub/../~/x.mk", "./~/x.mk"),
+    ],
+    ids=["alias-then-tilde", "tilde-then-alias", "alias-then-dot-tilde", "dot-tilde-then-alias"],
+)
+def test_tilde_word_is_reported_when_a_literal_word_normalises_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], words: str, outside: str
+) -> None:
+    # `sub/../~/x.mk` normalises to `~/x.mk`; the tilde word must not be dropped as its duplicate (make reads $HOME).
+    makefile = _write_service(tmp_path, f"-include {words}\n")
+
+    assert _make_messages(tmp_path, monkeypatch, capsys) == [f"include '{outside}' is outside the service directory"]
+    assert contract.makefile_targets(makefile).include_words == ("sub/../~/x.mk",)
+
+
+@pytest.mark.ac("IDP-28:AC-13")
+def test_repeated_outside_include_words_are_checked_in_linear_time(tmp_path: Path) -> None:
+    # 200 000 repeats of one outside word (just under 1 MiB): each repeat must be an O(1) lookup.
+    scan = _scan_text(tmp_path, "-include" + " ../a" * 200_000 + "\nlint:\n")
+
+    assert scan.violations == (contract.Violation("Makefile", "include '../a' is outside the service directory"),)
+    assert scan.targets == {"lint"}
+
+
+@pytest.mark.ac("IDP-28:AC-13")
+@pytest.mark.parametrize("word", ["~/x.m?", "./~/x.m*", "~[a]", "../../home/x.m?", "/etc/*.mk"])
+def test_outside_glob_include_word_is_a_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], word: str
+) -> None:
+    # make globs these words outside the service directory (`~` is expanded first): fail closed.
+    makefile = _write_service(tmp_path, f"-include {word}\n")
+
+    assert _make_messages(tmp_path, monkeypatch, capsys) == [f"include {word!r} is outside the service directory"]
+    assert contract.makefile_targets(makefile).include_words == ()
+
+
+@pytest.mark.ac("IDP-28:AC-13")
+def test_glob_include_word_inside_service_is_still_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    makefile = _write_service(tmp_path, "-include sub/*.mk a?.mk a~[b].mk\n")
+
+    assert _validate(tmp_path, monkeypatch, capsys) == ("idp.yaml: valid (idp-service.v1.json)\n", 0)
+    assert contract.makefile_targets(makefile).include_words == ()
+
+
+@pytest.mark.ac("IDP-17:AC-6")
+def test_include_spellings_through_a_symlink_are_scanned_as_make_reads_them(tmp_path: Path) -> None:
+    # `link/../b.mk` with `link -> sub/deep` is `sub/b.mk` for make (the OS resolves the link before `..`), not `b.mk`.
+    (tmp_path / "sub" / "deep").mkdir(parents=True)
+    (tmp_path / "link").symlink_to(Path("sub") / "deep")
+    (tmp_path / "b.mk").write_text("top:\n")
+    (tmp_path / "sub" / "b.mk").write_text("hidden:\n")
+
+    scan = _scan_text(tmp_path, "-include b.mk\n-include link/../b.mk ./b.mk\n")
+
+    assert scan.targets == {"top", "hidden"}
+    assert scan.include_words == ("b.mk", "link/../b.mk", "./b.mk")
+    assert scan.violations == ()
+
+
+@pytest.mark.ac("IDP-28:AC-10")
+def test_define_problems_past_the_cap_stop_the_scan(tmp_path: Path) -> None:
+    limit = contract.MAX_INCLUDE_PROBLEMS
+    scan = _scan_text(tmp_path, "define A\n" + "define B\n" * 50_000 + "endef\nlint:\n")
+
+    assert len(scan.violations) == limit + 1
+    assert scan.violations[-1] == contract.Violation("Makefile", f"too many include problems (limit {limit})")

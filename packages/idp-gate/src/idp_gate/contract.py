@@ -24,7 +24,6 @@ _INCLUDE_DIRECTIVES = frozenset({"include", "-include", "sinclude"})
 _SHADOWING_MAKEFILES = frozenset({"gnumakefile", "makefile"})
 # After the rule colon: `[export|override|private ...] VAR <op>` makes it a target-specific variable line.
 _TARGET_VARIABLE = re.compile(r"\s*(?:(?:export|override|private)\s+)*[^\s:=#;]+\s*(?::{1,3}|[+?!])?=")
-# `define NAME` starts a block; `define := x` (a variable named `define`) does not.
 # A top-level define line: blanks, modifiers, `define`, then a blank or the end, and no assignment operator after it
 # (`define := 1` and `export define ?= 3` assign a variable named `define`). Linear: each modifier word and its blanks
 # have one way to match, so a failed match backtracks at most once per word.
@@ -44,7 +43,7 @@ _FOREIGN_CHARACTER = re.compile("[\x00-\x08\x0e-\x1b\x1f\xa0\u1680\u2000-\u200a\
 # Tenant repos are untrusted (CI runs this on PRs): cap what a Makefile and its includes can make us read or report.
 MAX_MAKEFILE_BYTES = 1024 * 1024
 MAX_MAKEFILES = 64
-MAX_INCLUDE_WORDS = 1024  # distinct (normalised) include words queued
+MAX_INCLUDE_WORDS = 1024  # distinct include spellings recorded and queued
 MAX_INCLUDE_PROBLEMS = 20  # confinement/read violations before scanning stops
 MAX_SHOWN_WORD = 200  # characters of an include word's repr echoed in a message
 
@@ -102,10 +101,11 @@ def _is_include_line(line: str) -> bool:
 
 
 def _include_words(line: str) -> list[str]:
-    """Literal words named by an `include`/`-include`/`sinclude` line; `$`/glob words are skipped."""
+    """Words named by an `include`/`-include`/`sinclude` line without `$` (literal and glob words; `_Scanner.queue`
+    rejects outside words and skips glob words)."""
     if not _is_include_line(line):
         return []
-    return [w for w in line.split()[1:] if not any(c in w for c in "$*?[")]
+    return [w for w in line.split()[1:] if "$" not in w]
 
 
 def _dynamic_include_words(line: str) -> list[str]:
@@ -154,8 +154,10 @@ def _logical_lines(text: str) -> list[str]:
 
 
 def _collapse(raw: str) -> str:
-    """make's `collapse_continuations` on one logical line: each `\\`+newline becomes one space (blanks around it
-    dropped; with an even run of backslashes before it, half are kept and blanks before it stay). Linear."""
+    """make's `collapse_continuations` on one logical line: each `\\`+newline (ending an odd backslash run) becomes one
+    space with the blanks after it dropped; with n >= 3 backslashes, (n-1)/2 are kept and the blanks before them
+    stay, otherwise the blanks before it are dropped too. Tokens and directives match make; the exact spacing of
+    consecutive blank-only continuation lines may differ. Linear."""
     if "\n" not in raw:
         return raw
     *joined, last = raw.split("\n")
@@ -208,7 +210,7 @@ def _parsed_lines(text: str) -> tuple[list[_Line], list[str]]:
                 problems.append(kind)
             continue
         code = _COMMENT.split(collapsed, maxsplit=1)[0]
-        define = None if code.startswith("\t") else _DEFINE_LINE.match(code)
+        define = None if raw.startswith("\t") else _DEFINE_LINE.match(code)  # make tests the tab before collapsing
         if define is not None and define.group(1).split() in ([], ["override"]):
             in_define = True
             continue
@@ -290,11 +292,10 @@ def _lexically_outside(word: str, root: Path) -> bool:
 
 
 def _locate(path: Path, word: str | None, root: Path) -> Path | Violation | None:
-    """Real path of `path` inside `root`; a Violation if it escapes or cannot be resolved; None if not on disk."""
+    """Real path of `path` inside `root`; a Violation if it escapes or cannot be resolved; None if not on disk.
+    Lexically outside words never get here (`_Scanner.queue` reports them)."""
     if word is not None and "\x00" in word:  # the OS cannot name such a path (resolve would raise ValueError)
         return _cannot_read(word)
-    if word is not None and _lexically_outside(word, root):
-        return _outside(word)
     try:
         resolved = path.resolve(strict=True)
     except FileNotFoundError:
@@ -304,9 +305,9 @@ def _locate(path: Path, word: str | None, root: Path) -> Path | Violation | None
     return resolved if resolved.is_relative_to(root) else _outside(word)
 
 
-def _load_makefile(resolved: Path, name: str) -> tuple[list[_Line], list[Violation]] | Violation:
-    """Parsed lines and define-body violations of a confined regular file, or a Violation (not a regular file,
-    unreadable, too large, or using a line separator make does not use)."""
+def _load_makefile(resolved: Path, name: str, limit: int) -> tuple[list[_Line], list[Violation]] | Violation:
+    """Parsed lines and at most `limit` define violations of a confined regular file, or a Violation (not a regular
+    file, unreadable, too large, using a line separator make does not use, or a character make reads differently)."""
     if not resolved.is_file():  # directories, FIFOs, devices: never opened
         return _cannot_read(name)
     try:
@@ -320,7 +321,8 @@ def _load_makefile(resolved: Path, name: str) -> tuple[list[_Line], list[Violati
     if match := _FOREIGN_CHARACTER.search(text):
         return _foreign_character(name, match)
     lines, problems = _parsed_lines(text)
-    return lines, [_ambiguous_define_line(name) if p == "ambiguous" else _modifier_define(name) for p in problems]
+    kept = problems[:limit]  # past the problem cap the scan stops: do not build the rest
+    return lines, [_ambiguous_define_line(name) if p == "ambiguous" else _modifier_define(name) for p in kept]
 
 
 @dataclass
@@ -332,7 +334,7 @@ class _Scanner:
     targets: set[str] = field(default_factory=set)
     problems: list[Violation] = field(default_factory=list)
     pending: deque[tuple[Path, str | None]] = field(default_factory=deque)
-    words: set[str] = field(default_factory=set)
+    outside: set[str] = field(default_factory=set)
     spellings: list[str] = field(default_factory=list)
     seen_spellings: set[str] = field(default_factory=set)
     dynamic: list[str] = field(default_factory=list)
@@ -351,22 +353,23 @@ class _Scanner:
             self.problems.append(violation)
 
     def queue(self, word: str) -> None:
-        """Record each distinct spelling and queue the word once per normalised spelling; stop past
-        MAX_INCLUDE_WORDS distinct spellings or normalised words. Lexically outside words are queued (so `visit`
-        reports them) but not recorded: they always fail validation and are never pinned."""
-        if not self.stopped and word not in self.seen_spellings and not _lexically_outside(word, self.root):
-            if len(self.seen_spellings) >= MAX_INCLUDE_WORDS:
-                self.stop(f"too many include words (limit {MAX_INCLUDE_WORDS})")
-                return
-            self.seen_spellings.add(word)
-            self.spellings.append(word)
-        key = os.path.normpath(word)
-        if self.stopped or key in self.words:
+        """Handle each distinct spelling once (repeats are O(1) set lookups). A lexically outside word (also a glob)
+        is reported at once and never recorded or queued. Other glob words are skipped. Other words are recorded and
+        queued as written: `visit` dedupes files by real path, as make reads `link/../b.mk` through the link. Stop
+        past MAX_INCLUDE_WORDS distinct spellings."""
+        if self.stopped or word in self.seen_spellings or word in self.outside:
             return
-        if len(self.words) >= MAX_INCLUDE_WORDS:
+        if _lexically_outside(word, self.root):
+            self.outside.add(word)  # bounded: the problem cap stops the scan after MAX_INCLUDE_PROBLEMS
+            self.problem(_outside(word))
+            return
+        if any(c in word for c in "*?["):  # globs are not followed (IDP-17)
+            return
+        if len(self.seen_spellings) >= MAX_INCLUDE_WORDS:
             self.stop(f"too many include words (limit {MAX_INCLUDE_WORDS})")
             return
-        self.words.add(key)
+        self.seen_spellings.add(word)
+        self.spellings.append(word)
         self.pending.append((self.base / word, word))
 
     def record_dynamic(self, word: str) -> None:
@@ -390,7 +393,7 @@ class _Scanner:
             self.stop(f"too many included files (limit {MAX_MAKEFILES})")
             return
         self.visited.add(located)
-        loaded = _load_makefile(located, word or MAKE_PATH)
+        loaded = _load_makefile(located, word or MAKE_PATH, MAX_INCLUDE_PROBLEMS + 1 - len(self.problems))
         if isinstance(loaded, Violation):
             self.problem(loaded)
             return
