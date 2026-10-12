@@ -3,7 +3,14 @@
 IDP-22: an example that is a symlink or resolves outside the examples directory fails before anything runs, and
 `make verify` reads only the validated Makefile (`-f Makefile`). The Makefile and every literal include word the scan
 saw are pinned with `--assume-old=<word>`, so make neither remakes them nor restarts with unvalidated content.
-Residual risk: dynamic includes (`$(...)` words, e.g. `$(IDP_PROFILE_DIR)/defaults.mk`) are not pinned."""
+
+IDP-28: the Makefile is scanned once, and the validated scan supplies the pins. That scan reads make's logical lines
+(continuations collapsed, define bodies closed like make) and fails closed on lines or characters make reads
+differently and on `~` include words (AC-6..AC-13). `$(IDP_PROFILE_DIR)/<rest>` words are pinned as
+`<resolved profile dir>/<rest>`; any other `$` word, or a `<rest>` that is not literal, is empty or leaves the profile
+directory (`..` segment, leading `/`; AC-14), fails the example without running make.
+Residual risk: glob words, `$(eval ...)`-generated includes, `override IDP_PROFILE_DIR` and make reader features the
+scanner does not model (docs/platform/service-contract.md)."""
 
 from __future__ import annotations
 

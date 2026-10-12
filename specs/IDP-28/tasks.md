@@ -55,7 +55,7 @@ package tests green. Test names and exact expectations are in plan.md ("Tests").
   - Run `test_platform_examples_pass_conformance_within_60_seconds` and `test_conformance_fails_example_with_gnumakefile_bypass`
     (minimal-service must still PASS with the new profile pin).
   - (AC-4) Files: packages/idp-gate/src/idp_gate/conformance.py, packages/idp-gate/tests/test_conformance.py.
-- [ ] T7 Docs and wrap-up. Amendment 1: do this task last, after T14.
+- [x] T7 Docs and wrap-up. Amendment 1: do this task last, after T14.
   - `docs/platform/service-contract.md`: logical lines, the separator violation, delete the continuation and D7
     limitations, the AC-7 rationale text, the conformance profile pin.
   - `docs/platform/onboarding.md`: the single scan, profile pin, `dynamic include ... cannot be pinned`, and the

@@ -32,12 +32,44 @@ It runs make as `make -C <dir> -f Makefile --assume-old=Makefile --assume-old=<w
 validated `Makefile`: `Makefile` and every literal include word the validation scan recorded (also words for files not
 on disk, and a `./`-prefixed word additionally without its leading `./`) are pinned with `--assume-old`, so make neither
 remakes them (for example `Makefile: evil.txt` or a rule that generates `-include gen.mk`) nor restarts with
-unvalidated content. Before running make it scans the Makefile again; violations in that scan fail the example as
-`idp validate`. If the `--assume-old=` arguments exceed 64 KiB, the example fails
-`include words exceed the make argument limit` without running make. Residual risk: include words containing `$`
-(any `$(...)` include, including the profile's `$(IDP_PROFILE_DIR)/defaults.mk`), globs or `$(eval ...)`/`define`
-bodies are neither scanned nor pinned, so a rule targeting them could still remake them; examples are platform-owned
-and reviewed. An example entry that is a symlink, or whose real path resolves outside DIR, is reported
+unvalidated content. The Makefile is scanned once per example: the pinned words come from the same scan whose result
+`idp validate` accepted, and that scan reads make's logical lines (continuations, comments and `define` bodies as make
+reads them; see [How `idp validate` checks it](service-contract.md#how-idp-validate-checks-it)).
+
+Include words containing `$` are pinned in one form only: `$(IDP_PROFILE_DIR)/<rest>` with a literal `<rest>` is
+pinned as `--assume-old=<profile dir>/<rest>`, where `<profile dir>` is the resolved profile directory that is also
+passed to make as `IDP_PROFILE_DIR=<profile dir>` (so `include $(IDP_PROFILE_DIR)/defaults.mk` is pinned; the
+platform-owned `defaults.mk` itself is not scanned). Any other `$` word fails the example before make runs, naming the
+first such word: `FAIL examples/<x>: dynamic include '<word>' cannot be pinned`. That covers other variables
+(`$(OTHER)/x.mk`, `${IDP_PROFILE_DIR}/x.mk`, `$(IDP_PROFILE_DIR)x.mk`), `$$` (`a$$b.mk`), a `$` or glob character in
+`<rest>` (`$(IDP_PROFILE_DIR)/$(X).mk`, `$(IDP_PROFILE_DIR)/*.mk`), an empty `<rest>`, and a `<rest>` that leaves the
+profile directory (a `..` segment such as `$(IDP_PROFILE_DIR)/../x.mk`, or a leading `/`). Fix: include profile
+files as `$(IDP_PROFILE_DIR)/<file>`, and anything else by a literal path inside the service directory. If the
+`--assume-old=` arguments exceed 64 KiB, the example fails `include words exceed the make argument limit` without
+running make.
+
+Makefile problems fail the example as `FAIL examples/<x>: idp validate: <n> violation(s)` with one indented detail
+line each, and make is not run. The ones specific to how make reads Makefiles, and their fixes (details in
+[How `idp validate` checks it](service-contract.md#how-idp-validate-checks-it)):
+
+| Detail (after `idp.yaml: Makefile: `) | Fix |
+|---|---|
+| `'<file>' contains a line separator make does not use (<what>); use LF or CRLF line endings` | convert the file to LF or CRLF line endings |
+| `'<file>' contains a control or space character make reads differently (<what>); use only spaces, tabs and LF or CRLF line endings` | replace non-breaking/Unicode spaces with spaces; remove control characters (including NUL) |
+| `include line in '<file>' uses a backslash (continuation or escape); write each include word literally on one line` | one literal include line per word list, no `\`, also not a continuation leading into the include |
+| `define body in '<file>' has a line make reads differently in skipped conditional branches (nested define, endef followed by '#', or tab-indented endef); remove it` | no nested `define`; write `endef # comment`; do not tab-indent `endef` |
+| `'<file>' has a define with export, unexport or private, which GNU make 3.81 and 4.x read differently; use define or override define` | `define X` ... `endef`, then `export X` on its own line |
+| `include '<word>' is outside the service directory` (also `~/x.mk`, `./~/x.mk`) | copy the file into the service directory and include it by a relative path |
+| `missing required target '<t>'` although the rule exists | the rule is on a line swallowed by a comment ending in `\`, inside a `define` body, or starts with a blank after a continuation: write it as a plain column-0 rule |
+
+Residual risk, now narrowed to what the static scan does not model: glob include words without `$` are skipped,
+includes produced by `$(eval ...)` or by evaluated `define` bodies are not scanned, `override IDP_PROFILE_DIR` or
+`$(eval ...)` can make `$(IDP_PROFILE_DIR)` name another directory than the pinned one, and make's default include
+directories, archive syntax (`lib(x.mk)`), `.RECIPEPREFIX`/`load`/`guile`, a top-level tab-indented `define` and
+make 4.x on macOS are not modelled (see the residual-risk list in
+[How `idp validate` checks it](service-contract.md#how-idp-validate-checks-it)). make's output is not bounded in
+bytes, and the files can still change between the scan and make (TOCTOU, IDP-23). Examples are platform-owned and
+reviewed. An example entry that is a symlink, or whose real path resolves outside DIR, is reported
 `FAIL examples/<x>: outside examples directory` without running `idp validate` or make. An `idp.yaml` that cannot be
 read, is not valid UTF-8 or is nested too deeply fails that example (`idp validate: 1 violation(s)` with the
 `<root>: ...` detail) and the run continues with the remaining examples.
