@@ -170,9 +170,10 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-31-conformance-
 - Q3: reworded; service-contract.md now says `make -pn` in a sandbox "is reconsidered after IDP-23 (ADR-0013)".
 - Q4: IDP-29 and IDP-30 are cited by key plus their Jira title, without further description of their content.
 - Q5: not here; reviewer agent prompts belong with the review triage rule (IDP-32).
-- Q6: the spec's reading of "runs code it didn't write" is used, and the ADR now also defines "holds credentials"
-  (repository or organisation secrets, `id-token: write`, a write-scoped `GITHUB_TOKEN`, cloud credentials, or a
-  developer or agent workstation environment).
+- Q6: the spec's reading of "runs code it didn't write" is used, and the ADR now also defines when a CI job "holds
+  credentials" (repository or organisation secrets, `id-token: write`, a write-scoped `GITHUB_TOKEN` or cloud
+  credentials). Developer and agent workstations hold credentials too, but the ADR's "Local and agent runs" paragraph
+  puts their boundary in human review and the agent permission and hook layer, not the scanner.
 
 ## Traceability
 | AC | Planned tests |
