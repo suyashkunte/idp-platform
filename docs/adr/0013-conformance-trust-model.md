@@ -46,17 +46,18 @@ least-privilege roles (per-tenant roles are iteration 3). Until then, what prote
 `examples/` and `build-profiles/`, and that the only CI job that runs the scanner (`platform-ci.yml`) has no secrets.
 
 Rule: new scanner-hardening work is only taken on for a regression, or for a bypass in a job that holds credentials or
-runs code it didn't write. A job "holds credentials" when it has any of: repository or organisation secrets,
-`id-token: write`, a write-scoped `GITHUB_TOKEN`, cloud credentials, or a developer or agent workstation environment.
-A job "runs code it didn't write" when the Makefile or scanner it executes does not come from the same change that is
-being checked (for example a platform job running conformance on a tenant repository, or a tenant pipeline running the
-platform's scanner on tenant code). Today's `platform-ci.yml` job is outside the rule: it has no secrets, only a
+runs code it didn't write. A CI job "holds credentials" when it has any of: repository or organisation secrets,
+`id-token: write`, a write-scoped `GITHUB_TOKEN` or cloud credentials (local and agent runs: see below). A job "runs
+code it didn't write" when the Makefile or scanner it executes does not come from the same change that is being checked
+(for example a platform job running conformance on a tenant repository, or a tenant pipeline running the platform's
+scanner on tenant code). Today's `platform-ci.yml` job is outside the rule: it has no secrets, only a
 read-only `GITHUB_TOKEN` that the PR's own code can already use, and it runs the PR's own scanner on the PR's own files.
 
 Local and agent runs: `make verify` (through `make conformance`) and `make verify-fast` (the agent Stop hook, through
 the conformance tests in `make test`) run repository code, including `idp conformance examples`, with the user's
-environment by design. The boundary there is human review plus the agent permission and hook layer, not the scanner,
-just as `make test` runs agent-written Python. Such runs are therefore not a reason for scanner hardening.
+environment by design. A developer or agent workstation does hold credentials, but the boundary there is human review
+plus the agent permission and hook layer, not the scanner, just as `make test` runs agent-written Python. Such runs are
+therefore not a reason for scanner hardening.
 
 Existing checks stay and keep failing closed; this ADR changes no behaviour.
 
