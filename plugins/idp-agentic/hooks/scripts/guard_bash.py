@@ -56,10 +56,12 @@ MARKER_WHY = "the APPROVED marker is written only by `make approve-spec`, run by
 MENTION = re.compile(r"approve-spec|(?<![\w.-])approved(?![\w.-])", re.IGNORECASE)
 MAX_DEPTH = 8  # nested $( ) levels the lexer follows
 
+# test, [ and [[ only relax plain marker paths (READ) and are neither printers nor inert: bash evaluates array
+# subscripts such as 'a[$(cmd)]' in their arguments, and in the variable name of printf -v (IDP-14 amendment 2).
 TESTS = {"test", "[", "[["}
 READERS = {"cat", "ls", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg"} | TESTS
-PRINTERS = READERS - {"ls"} | {"echo", "printf", "jq", "true", ":"}
-INERT = PRINTERS | READERS | {"tee", "cd", "mkdir", "pwd", "false"}
+PRINTERS = (READERS - {"ls"} - TESTS) | {"echo", "printf", "jq", "true", ":"}
+INERT = PRINTERS | (READERS - TESTS) | {"tee", "cd", "mkdir", "pwd", "false"}
 GIT_READ = {"log", "show", "status", "diff"}
 GIT_DATA = GIT_READ | {"grep"}
 GIT_MESSAGE = {"commit", "tag", "notes"}
@@ -295,6 +297,8 @@ def _data_positions(cmd):
     if not words[0].plain or any(_OUTPUT.fullmatch(w.text) for w in words):
         return [], False
     name, sub = words[0].text, [w.text for w in words[1:3]]
+    if name == "printf" and any(w.text.startswith("-v") for w in words):
+        return [], False  # printf -v assigns to a variable, and bash evaluates a subscript in its name
     if name in PRINTERS:
         return words[1:], True
     if name == "tee":
