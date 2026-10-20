@@ -109,8 +109,8 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-31-conformance-
 - A later edit to the residual-risk text (for example IDP-23 narrowing it) keeps the AC-2 test green as long as the
   link and the sentence stay. The test locates the text by its leading words (`**Residual risk` bullet,
   `Residual risk,` paragraph); if the leading words change, the test fails with a message naming the file.
-- IDP-29 and IDP-30 are cited by key only. The repository has no other text about them, and the ADR does not
-  describe their content beyond "further scanner hardening" (Q4).
+- IDP-29 and IDP-30 are cited by key plus their Jira title (in the ADR's Links section). The repository has no other
+  text about them, and the ADR does not describe their content beyond that (Q4).
 - IDP-32 (review triage rule) is a separate ticket and is not mentioned or implemented here (instruction from the
   2026-10-20 agreement).
 - ASSUMPTION A1: "uses the headings of the template" means the same `##`/`###` headings in the same order, with no
@@ -163,6 +163,16 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-31-conformance-
   is being checked (for example a platform job running conformance on a tenant repository, or a tenant pipeline
   running the platform's scanner on tenant code). Today's `platform-ci.yml` job is neither (no credentials, and it
   runs the PR's own scanner on the PR's own files). Please confirm this reading.
+
+## Decisions (orchestrator, pending human approval at PR)
+- Q1: no permanent test for AC-3's "none changes"; the PR diff and a recorded `git diff --stat` are the evidence (A4).
+- Q2: no "Related" links added to ADRs 0001-0012.
+- Q3: reworded; service-contract.md now says `make -pn` in a sandbox "is reconsidered after IDP-23 (ADR-0013)".
+- Q4: IDP-29 and IDP-30 are cited by key plus their Jira title, without further description of their content.
+- Q5: not here; reviewer agent prompts belong with the review triage rule (IDP-32).
+- Q6: the spec's reading of "runs code it didn't write" is used, and the ADR now also defines "holds credentials"
+  (repository or organisation secrets, `id-token: write`, a write-scoped `GITHUB_TOKEN`, cloud credentials, or a
+  developer or agent workstation environment).
 
 ## Traceability
 | AC | Planned tests |
