@@ -179,8 +179,11 @@ spec:
   monorepo, are rejected even with `-include`; copy shared targets into the service directory instead.
   When any of these occur, only these problems are reported (the target list would be incomplete), in line order,
   after any shadowing-makefile violations.
-- **Residual risk (what the scanner does not model).** The scanner is a static model of GNU make's reader, not make
-  itself (running `make -pn` in a sandbox is an ADR candidate after IDP-23). Not modelled:
+- **Residual risk (what the scanner does not model).** `idp validate` and `idp conformance` are a fail-closed,
+  best-effort correctness check, not a security boundary; the intended boundary is the conformance sandbox (IDP-23, not
+  yet implemented) and least-privilege roles ([ADR-0013](../adr/0013-conformance-trust-model.md)). The scanner is a
+  static model of GNU make's reader, not make itself (running `make -pn` in a sandbox is reconsidered after IDP-23
+  (ADR-0013)). Not modelled:
   - include words that are globs without `$` (`include *.mk`) are skipped, neither scanned nor pinned;
   - includes produced by `$(eval ...)`, or by include lines inside `define` bodies that are later evaluated;
   - make's default include search path: a literal include not found beside the Makefile is looked up in directories
