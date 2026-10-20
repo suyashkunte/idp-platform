@@ -61,6 +61,15 @@ def test_hooks_reference_existing_executable_scripts():
         assert os.access(script, os.X_OK), f"{rel} is not executable"
 
 
+@pytest.mark.ac("IDP-14:AC-5")
+def test_pr_generate_uses_environment_co_author_trailer():
+    text = " ".join((PLUGIN / "skills" / "pr-generate" / "SKILL.md").read_text().split())
+    assert "noreply@anthropic.com" not in text, "pr-generate still hard-codes the trailer e-mail"
+    assert "Co-Authored-By: Claude" not in text, "pr-generate still hard-codes a Co-Authored-By trailer value"
+    assert "`Co-Authored-By` trailer supplied by the environment" in text
+    assert "never hard-code or invent one" in text
+
+
 @pytest.mark.ac("IDP-10:AC-1")
 def test_project_settings_enable_plugin_from_github_marketplace():
     settings = json.loads((ROOT / ".claude" / "settings.json").read_text())
