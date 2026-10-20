@@ -147,6 +147,12 @@ RUNS_APPROVAL = [
     "echo 'make approve-spec KEY=IDP-1' | sudo -s",
     "make {approve-spec,}",
     "m=make; $m approve-spec",
+    "[[ 'a[$(make approve-spec)]' -eq 0 ]]",
+    "test -v 'a[$(make approve-spec)]'",
+    "[ -v 'a[$(make approve-spec)]' ]",
+    "[[ -v 'a[$(make approve-spec)]' ]]",
+    "printf -v 'a[$(make approve-spec)]' x",
+    "printf -v'a[$(make approve-spec)]' x",
 ]
 
 WRITES_MARKER = [
@@ -225,6 +231,11 @@ MENTIONS_ONLY = [
     "git log --oneline -- specs/IDP-14/APPROVED",
     "echo 'approved'",
     "cat specs/IDP-14/APPROVED | head -c 10",
+    "[ -f specs/IDP-14/APPROVED ] && echo present",
+    "[[ -e specs/IDP-14/APPROVED ]]",
+    "test -s specs/IDP-14/APPROVED",
+    "grep -v 'approve-spec' notes.md",
+    "printf '%s\\n' 'approve-spec'",
 ]
 
 APPROVAL = "spec approval is a human checkpoint"
@@ -253,6 +264,12 @@ UNSURE_MENTIONS = [
     ("git commit -m x -- 'specs/IDP-1/APPROVED'", MARKER),
     ("tee 'specs/IDP-1/APPROVED' <<'EOF'\nx\nEOF", MARKER),
     ("rg --pre 'make approve-spec' x", APPROVAL),
+    # test, [ and [[ get no DATA relaxation (amendment 2): these block although bash 5.2 does not run them.
+    ("test 'a[$(make approve-spec)]' -eq 0", APPROVAL),
+    ("[ 'a[$(make approve-spec)]' -eq 0 ]", APPROVAL),
+    ("[ \"$x\" = 'approve-spec' ]", APPROVAL),
+    ("[[ -f specs/IDP-14/APPROVED ]] && echo 'approve-spec'", APPROVAL),
+    ("test -f specs/IDP-14/APPROVED && echo 'make approve-spec'", APPROVAL),
 ]
 
 COMMENTED_MENTIONS = [
