@@ -78,8 +78,8 @@ def test_adr_0013_uses_template_headings_and_is_accepted() -> None:
     assert _headings(ADR_0013) == template_headings
     lines = ADR_0013.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "# 0013. Conformance trust model"
-    metadata = [line.rstrip() for line in lines if line.startswith("- **")][:3]
-    assert metadata == [
+    assert lines[1] == ""
+    assert [line.rstrip() for line in lines[2:5]] == [
         "- **Status:** Accepted",
         "- **Date:** 2026-10-20",
         "- **Deciders:** Suyash Kunte",
@@ -100,7 +100,9 @@ def test_adr_0013_records_decision_rule_parked_tickets_and_make_db() -> None:
                 "fail-closed, best-effort correctness check",
                 "`idp validate`",
                 "conformance",
-                "security boundary",
+                "not a security boundary",
+                "boundary is the conformance sandbox (IDP-23",
+                "keep failing closed",
                 "IDP-23",
                 "least-privilege",
                 "only taken on for a regression, or for a bypass in a job that holds credentials or runs code it"
@@ -119,7 +121,15 @@ def test_adr_0013_records_decision_rule_parked_tickets_and_make_db() -> None:
     assert (
         _missing(
             context,
-            ["IDP-22", "D3", "`platform-ci.yml`", "`examples/`", "arbitrary shell", "weigh scanner findings"],
+            [
+                "IDP-22 decision D3",
+                "`platform-ci.yml`",
+                "change them rather than get past them",
+                "`examples/`",
+                "arbitrary shell",
+                "least-privilege AWS roles",
+                "weigh scanner findings",
+            ],
         )
         == []
     )
@@ -152,7 +162,7 @@ def test_residual_risk_text_links_adr_0013_and_states_no_security_boundary(rel: 
 
 @pytest.mark.ac("IDP-31:AC-3")
 def test_adr_numbers_are_unique_and_0013_is_the_trust_model() -> None:
-    files = sorted(p.name for p in ADR_DIR.glob("*.md"))
+    files = sorted(p.name for p in ADR_DIR.glob("[0-9][0-9][0-9][0-9]-*.md"))
     matches = [_ADR_NAME.match(name) for name in files]
     assert [name for name, m in zip(files, matches, strict=True) if m is None] == []
     numbers = [int(m.group(1)) for m in matches if m is not None]
@@ -162,6 +172,6 @@ def test_adr_numbers_are_unique_and_0013_is_the_trust_model() -> None:
     bad_titles = [
         name
         for name in files
-        if not (ADR_DIR / name).read_text(encoding="utf-8").splitlines()[0].startswith(f"# {name[:4]}.")
+        if not ((ADR_DIR / name).read_text(encoding="utf-8").splitlines() or [""])[0].startswith(f"# {name[:4]}.")
     ]
     assert bad_titles == []
