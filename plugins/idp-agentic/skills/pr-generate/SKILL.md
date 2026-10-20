@@ -5,8 +5,10 @@ description: Push the feature branch and open a DRAFT pull request with the IDP 
 
 # Open the draft PR
 
-1. Make sure the work is committed in logical commits, titled `<KEY>: <imperative summary>`, each with the trailer
-   `Co-Authored-By: Claude <noreply@anthropic.com>`.
+1. Make sure the work is committed in logical commits, titled `<KEY>: <imperative summary>`. End each commit message
+   with the `Co-Authored-By` trailer supplied by the environment (the harness or its system instructions give the one
+   for the model you are running as). Copy it exactly; never hard-code or invent one. If the environment supplies
+   none, add none.
 2. `git push -u origin HEAD` (feature branch only).
 3. Ask the `pr-composer` subagent for the body using `templates/pr-body.md` in this skill's folder: fill the AC→test
    table from `make spec-trace KEY=<KEY>` output and the evidence from the last `make verify` run.

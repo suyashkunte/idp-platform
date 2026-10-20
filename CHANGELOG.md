@@ -70,3 +70,11 @@ versions follow [Semantic Versioning](https://semver.org/).
   Makefile once and pins from that validated scan, pins `$(IDP_PROFILE_DIR)/<literal rest>` as
   `<resolved profile dir>/<rest>`, and fails any other `$` include word (including a `<rest>` with a `..` segment or
   a leading `/`) with `dynamic include '<word>' cannot be pinned` without running make.
+
+### Fixed
+- IDP-14: the Bash guard still blocks any mention of approve-spec or an APPROVED file, except quoted or heredoc text
+  given to commands that only print or record it (cat, echo, printf, grep, git commit -m, gh pr create --body, ...)
+  and plain marker paths given to read-only commands (cat, ls, head, test -f, git status/diff/log/show); comments,
+  unquoted mentions and anything the lexer cannot follow still block, and `test`/`[`/`[[` and `printf -v` never relax
+  quoted text. The pr-generate skill uses the Co-Authored-By trailer supplied by the environment. Takes effect in
+  agent sessions after the plugin is updated.
