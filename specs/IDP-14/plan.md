@@ -756,3 +756,563 @@ None (local hook). The operator signal is the unchanged `BLOCKED by idp-agentic:
   after merge.
 - Rollout: H1 commit on the feature branch, PR, merge, plugin update.
 - Rollback: revert the PR (or only the H1 commit, by a human). No data or config to undo.
+
+## Amendment 1 (2026-10-20, after review loop 1): relax-only (H2, T4)
+H1's verdict is superseded (spec "Amendment 1"). The design above is kept as history; the sections below replace it
+wherever they differ.
+
+### Approach
+1. `check()` runs the unchanged `RULES` first (AC-4).
+2. `approval_violation()` collects every raw mention span with
+   `MENTION = approve-spec|(?<![\w.-])approved(?![\w.-])` (case-insensitive). With no mention it returns `None`
+   without lexing.
+3. `_Lexer.scan()` splits the command the way bash does into simple commands at every `$( )` level. Each command
+   has words, and each word records:
+   - its literal text (for names and options);
+   - `plain` (only unquoted, unescaped characters);
+   - `data`: the interior spans of `'...'`, `$'...'`, and `"..."` without `$(`;
+   - `inner`: data spans accepted inside its `$( )`.
+
+   Each command also records the spans of its heredoc bodies that are literal, or expanding without `$(`, backtick
+   or `${`. Redirect targets are read but not kept. Comments are skipped (never relaxed). Anything the lexer cannot
+   follow raises `_Unsure`.
+4. Relaxed spans:
+   - DATA (`_accepted`): only if every simple command is `_inert`. Then each printer contributes the data and inner
+     spans of its DATA-position words (`_data_positions`), plus its heredoc bodies when stdin is data.
+   - READ (`_reads`): plain arguments of read commands, used for marker mentions only.
+5. A mention that is not inside a relaxed span (checked with `bisect`) blocks. The reason is the approval reason if
+   any such mention is `approve-spec`, otherwise the marker reason. `_Unsure` means no relaxed spans at all.
+6. `main()` turns a non-string `command` into its JSON text (review c06).
+
+Compared with H1, these are gone: `WRAPPERS`/heads scanning, the writer lists, the interpreter regex, the `UNSURE`
+verdict, the `-m` marker exemption, the masking output, the escape rewriting and the `.` heuristic.
+
+### H2: replacement for `plugins/idp-agentic/hooks/scripts/guard_bash.py`
+Complete file. It is stdlib-only (`bisect`, `json`, `re`, `sys`) and Python 3.9-compatible (no `match`, no `X | Y`,
+no walrus, no `zip(strict=)`). Constants are set literals, lines are at most 120 characters, and it is written to be
+ruff-format-stable. `RULES`, `check()`'s order and the stderr format are unchanged.
+
+```python
+#!/usr/bin/env python3
+"""PreToolUse guard for Bash: block commands that bypass human checkpoints or change shared state (exit 2 = block).
+
+Defence in depth behind the permission deny-list and GitHub rulesets. Stdlib only, Python 3.9+.
+
+Spec approval (IDP-14) is relax-only: every mention of `approve-spec` or of an `APPROVED` file in the raw command
+blocks, unless a small lexer shows that the mention is quoted or heredoc data given to a command that only prints or
+records it, or (for the marker) a plain argument of a read-only command. When the lexer cannot follow the shell,
+nothing is relaxed.
+"""
+
+import bisect
+import json
+import re
+import sys
+
+RULES = [
+    (r"\bgit\s+push\b[^;&|]*\s(--force(-with-lease)?|-f)\b", "force-push is never allowed"),
+    (r"\bgit\s+push\b[^;&|]*\b(HEAD:|refs/heads/)?(main|master)\b", "push to main: changes reach main only via a PR"),
+    (r"\bgit\s+(commit|push)\b[^;&|]*--no-verify\b", "skipping git hooks is not allowed"),
+    (r"\bgit\s+config\b[^;&|]*core\.hooksPath", "changing git hook configuration is not allowed"),
+    (r"\bgh\s+pr\s+merge\b", "merging is a human decision (checkpoint B)"),
+    (r"\bgh\s+pr\s+review\b[^;&|]*(--approve|\s-a\b)", "approving PRs is a human decision"),
+    (
+        r"\bgh\s+api\b[^;&|]*(/merge\b|/reviews\b|/rulesets\b|/branches/[^ ]+/protection)",
+        "merge/approve/protection via API",
+    ),
+    (
+        r"\bterraform\s+(apply|destroy|import|state\s+(rm|mv|push|replace-provider))\b",
+        "infrastructure changes run in CI",
+    ),
+    (
+        r"\bkubectl\s+(apply|create|delete|edit|patch|replace|scale|label|annotate|drain|cordon|"
+        r"rollout\s+(restart|undo))\b",
+        "cluster changes are made by the pipeline, not the agent",
+    ),
+    (r"\bhelm\s+(install|upgrade|uninstall|delete|rollback)\b", "deployments are made by the pipeline"),
+    (
+        r"\baws\s+\S+\s+(create|delete|put|update|terminate|modify|attach|detach|run|start|stop|reboot|remove|add|"
+        r"associate|disassociate|enable|disable|tag|untag)-",
+        "mutating AWS calls are made by the pipeline",
+    ),
+    (r"\brm\s+-[a-zA-Z]*[rR][a-zA-Z]*\s+(/|~|\$HOME|\.)(\s|$)", "recursive delete of a root, home or repo directory"),
+    (r"\b(curl|wget)\b[^|;&]*\|\s*(sudo\s+)?(ba|z)?sh\b", "piping downloads into a shell"),
+    (
+        r"(>|\btee\b|\bsed\s+-i|\bcp\b|\bmv\b|\brm\b)[^;&|]*"
+        r"(\.github/|\.claude/settings\.json|\.claude/idp-protected-paths)",
+        "writing protected paths via the shell",
+    ),
+]
+COMPILED = [(re.compile(p, re.IGNORECASE), why) for p, why in RULES]
+
+# Spec approval (IDP-14): a raw mention blocks unless it lies in a span the lexer relaxed.
+APPROVE_WHY = "spec approval is a human checkpoint (A)"
+MARKER_WHY = "the APPROVED marker is written only by `make approve-spec`, run by a human"
+MENTION = re.compile(r"approve-spec|(?<![\w.-])approved(?![\w.-])", re.IGNORECASE)
+MAX_DEPTH = 8  # nested $( ) levels the lexer follows
+
+TESTS = {"test", "[", "[["}
+READERS = {"cat", "ls", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg"} | TESTS
+PRINTERS = READERS - {"ls"} | {"echo", "printf", "jq", "true", ":"}
+INERT = PRINTERS | READERS | {"tee", "cd", "mkdir", "pwd", "false"}
+GIT_READ = {"log", "show", "status", "diff"}
+GIT_DATA = GIT_READ | {"grep"}
+GIT_MESSAGE = {"commit", "tag", "notes"}
+GH_OBJECTS = {"issue", "pr", "release"}
+GH_VERBS = {"create", "edit", "comment"}
+
+_PLAIN = re.compile(r"[^ \t\n;&|()<>\\'\"$`]+")
+_DQ_SPECIAL = re.compile(r'[\\"$`]')
+_ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL)
+_SIMPLE_PARAM = re.compile(r"\$\{(?:#?[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])\}")
+_OUTPUT = re.compile(r"-o.*|--output.*|of=.*|-w|--pre.*|-O.*|--open-files-in-pager.*")
+
+
+class _Unsure(Exception):
+    """The lexer cannot follow the shell here, so nothing is relaxed."""
+
+
+class _Word:
+    """One shell word: its literal text (for names and options) and the raw spans that may be relaxed."""
+
+    def __init__(self, start):
+        self.start = start
+        self.end = start
+        self.text = ""
+        self.plain = True  # only unquoted, unescaped characters
+        self.data = []  # spans of quoted text that the shell does not expand
+        self.inner = []  # spans relaxed inside a $( ) of this word
+
+
+class _Command:
+    """One simple command: its words and the spans of its heredoc bodies that are literal data."""
+
+    def __init__(self):
+        self.words = []
+        self.bodies = []
+
+
+class _Lexer:
+    """Splits a command into simple commands the way bash does, or raises _Unsure."""
+
+    def __init__(self, text):
+        self.s = text
+        self.i = 0
+        self.commands = []  # every simple command, at every nesting level
+        self.pending = []  # heredocs waiting for the end of the line: (delimiter, strip_tabs, literal, command, depth)
+
+    def scan(self, depth):
+        """Simple commands up to the end of the text, or (depth > 0) up to the `)` closing a substitution."""
+        s, cmds, cmd, parens = self.s, [], _Command(), 0
+        while True:
+            self.blanks()
+            if self.i >= len(s):
+                if depth or self.pending:
+                    raise _Unsure
+                self.finish(cmd, cmds)
+                return cmds
+            c = s[self.i]
+            if c == "#":  # a comment: skipped, so its mentions are never relaxed
+                end = s.find("\n", self.i)
+                self.i = len(s) if end < 0 else end
+            elif c in "<>" or s.startswith("&>", self.i):
+                self.redirect(cmd, depth)
+            elif c in ";&|\n()":
+                if s.startswith("((", self.i):
+                    raise _Unsure  # arithmetic
+                self.i += 1
+                cmd = self.finish(cmd, cmds)
+                if c == "\n":
+                    self.bodies(depth)
+                elif c == "(":
+                    parens += 1
+                elif c == ")" and depth and not parens:
+                    if self.pending:
+                        raise _Unsure
+                    return cmds
+                elif c == ")":
+                    parens -= 1
+            else:
+                cmd.words.append(self.word(depth))
+
+    def blanks(self):
+        s = self.s
+        while self.i < len(s) and (s[self.i] in " \t" or s.startswith("\\\n", self.i)):
+            self.i += 1 if s[self.i] in " \t" else 2
+
+    def finish(self, cmd, cmds):
+        """Close a simple command and return a fresh one."""
+        if cmd.words:
+            if cmd.words[0].text == "case":
+                raise _Unsure  # `case` patterns end in `)`
+            cmds.append(cmd)
+            self.commands.append(cmd)
+        return _Command()
+
+    def redirect(self, cmd, depth):
+        """A redirection, whose target is never relaxed; `<<` and `<<-` start a heredoc."""
+        s = self.s
+        if s.startswith(("<(", ">("), self.i):
+            raise _Unsure  # process substitution
+        if s.startswith("<<", self.i) and not s.startswith("<<<", self.i):
+            strip_tabs = s.startswith("<<-", self.i)
+            self.i += 3 if strip_tabs else 2
+            self.blanks()
+            start = self.i
+            delimiter = self.word(depth)
+            if not delimiter.text or "$" in s[start : self.i]:
+                raise _Unsure
+            self.pending.append((delimiter.text, strip_tabs, not delimiter.plain, cmd, depth))
+            return
+        while self.i < len(s) and s[self.i] in "<>&|":
+            self.i += 1
+        self.blanks()
+        target = self.word(depth)
+        if target.end == target.start:
+            raise _Unsure  # a redirection without a target
+
+    def bodies(self, depth):
+        """Read the heredoc bodies that start after the newline just passed."""
+        s, pending, self.pending = self.s, self.pending, []
+        for delimiter, strip_tabs, literal, cmd, level in pending:
+            if level != depth:
+                raise _Unsure
+            start = line_start = self.i
+            while True:
+                if self.i >= len(s):
+                    raise _Unsure  # no terminator line
+                line_start = self.i
+                end = s.find("\n", line_start)
+                end = len(s) if end < 0 else end
+                self.i = end + 1
+                line = s[line_start:end]
+                if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                    break
+            body = s[start:line_start]
+            if not literal and "\\" in body:
+                raise _Unsure  # a backslash-newline could move the terminator line
+            if literal or not any(x in body for x in ("$(", "`", "${")):
+                cmd.bodies.append((start, line_start))
+
+    def word(self, depth):
+        """One word; quoted literal text is recorded as data, and $( ) inside it is scanned as code."""
+        s, w, text = self.s, _Word(self.i), []
+        while self.i < len(s):
+            plain = _PLAIN.match(s, self.i)
+            if plain:
+                text.append(plain.group())
+                self.i = plain.end()
+                continue
+            c = s[self.i]
+            if c in " \t\n;&|()<>":
+                break
+            w.plain = False
+            if c == "\\":
+                text.append(s[self.i + 1 : self.i + 2].strip("\n"))
+                self.i += 2
+            elif c == "'":
+                end = s.find("'", self.i + 1)
+                if end < 0:
+                    raise _Unsure
+                w.data.append((self.i + 1, end))
+                text.append(s[self.i + 1 : end])
+                self.i = end + 1
+            elif c == '"':
+                text.append(self.double(w, depth))
+            elif c == "`":
+                raise _Unsure
+            elif s.startswith("$'", self.i):
+                ansi = _ANSI_C.match(s, self.i)
+                if not ansi:
+                    raise _Unsure
+                w.data.append(ansi.span(1))
+                text.append(ansi.group(1))
+                self.i = ansi.end()
+            elif s.startswith('$"', self.i):
+                self.i += 1
+                text.append(self.double(w, depth))
+            else:
+                self.dollar(w, depth)
+        w.end, w.text = self.i, "".join(text)
+        return w
+
+    def double(self, w, depth):
+        """Double-quoted text from its opening quote: data unless it holds $( ), which is scanned as code."""
+        s, start = self.s, self.i + 1
+        self.i, code = start, False
+        while True:
+            special = _DQ_SPECIAL.search(s, self.i)
+            if not special:
+                raise _Unsure
+            self.i = special.start()
+            c = s[self.i]
+            if c == '"':
+                break
+            if c == "\\":
+                self.i += 2
+            elif c == "`":
+                raise _Unsure
+            else:
+                code = self.dollar(w, depth) or code
+        if not code:
+            w.data.append((start, self.i))
+        self.i += 1
+        return s[start : self.i - 1]
+
+    def dollar(self, w, depth):
+        """`$` here: a $( ) substitution (scanned; returns True), a simple parameter, or a plain `$`."""
+        s, i = self.s, self.i
+        if s.startswith("$((", i):
+            raise _Unsure  # arithmetic
+        if s.startswith("$(", i):
+            if depth >= MAX_DEPTH:
+                raise _Unsure
+            self.i = i + 2
+            w.inner.extend(_accepted(self.scan(depth + 1)))
+            return True
+        param = _SIMPLE_PARAM.match(s, i)
+        if s.startswith("${", i) and not param:
+            raise _Unsure
+        self.i = param.end() if param else i + 1
+        return False
+
+
+def _values(words, options):
+    """Words that are the value of one of the options (`-m msg`, `--message=msg`)."""
+    return [
+        w for k, w in enumerate(words) if k and (words[k - 1].text in options or w.text.split("=", 1)[0] in options)
+    ]
+
+
+def _data_positions(cmd):
+    """(words whose quoted text is data, whether heredoc bodies are data) for a printer command (rule a)."""
+    words = cmd.words
+    if not words[0].plain or any(_OUTPUT.fullmatch(w.text) for w in words):
+        return [], False
+    name, sub = words[0].text, [w.text for w in words[1:3]]
+    if name in PRINTERS:
+        return words[1:], True
+    if name == "tee":
+        return [], True
+    if name == "git" and sub and sub[0] in GIT_DATA:
+        return words[2:], False
+    if name == "git" and sub and sub[0] in GIT_MESSAGE:
+        return _values(words, {"-m", "--message"}), False
+    if name == "gh" and len(sub) == 2 and sub[0] in GH_OBJECTS and sub[1] in GH_VERBS:
+        stdin = any(words[k].text in {"--body-file", "-F"} and words[k + 1].text == "-" for k in range(len(words) - 1))
+        return _values(words, {"--body", "--title", "-b", "-t"}), stdin
+    return [], False
+
+
+def _accepted(cmds):
+    """Relaxed data spans of these commands, including data printed inside a $( ) that is itself data."""
+    spans = []
+    for cmd in cmds:
+        words, stdin = _data_positions(cmd)
+        if stdin:
+            spans.extend(cmd.bodies)
+        for w in words:
+            spans.extend(w.data + w.inner)
+    return spans
+
+
+def _inert(cmd):
+    """True for commands that cannot run text or files as code."""
+    head = cmd.words[0]
+    sub = cmd.words[1].text if len(cmd.words) > 1 else ""
+    if not head.plain:
+        return False
+    if head.text == "git":
+        return sub in GIT_DATA | GIT_MESSAGE
+    if head.text == "gh":
+        return sub in GH_OBJECTS
+    return head.text in INERT
+
+
+def _reads(cmd):
+    """Spans of plain arguments of read-only commands (rule b; relaxes marker mentions only)."""
+    words = cmd.words
+    if not words[0].plain or any(_OUTPUT.fullmatch(w.text) for w in words):
+        return []
+    name = words[0].text
+    if name == "git":
+        first = 2 if len(words) > 1 and words[1].text in GIT_READ else len(words)
+    else:
+        first = 1 if name in READERS else len(words)
+    return [
+        (w.start, w.end)
+        for k, w in enumerate(words[first:], first)
+        if w.plain and not w.text.startswith("-") and (name not in TESTS or words[k - 1].text in {"-f", "-e", "-s"})
+    ]
+
+
+def _covered(spans, start, end):
+    """True if [start, end) lies inside one of the sorted, disjoint spans."""
+    k = bisect.bisect_right(spans, (start, float("inf"))) - 1
+    return k >= 0 and spans[k][1] >= end
+
+
+def approval_violation(command):
+    """Block a mention of spec approval or of the APPROVED marker unless the lexer relaxed its position."""
+    mentions = [(m.start(), m.end(), m.group().lower() == "approve-spec") for m in MENTION.finditer(command)]
+    if not mentions:
+        return None
+    data, reads = [], []
+    try:
+        lexer = _Lexer(command)
+        cmds = lexer.scan(0)
+        reads = [span for cmd in lexer.commands for span in _reads(cmd)]
+        if all(_inert(cmd) for cmd in lexer.commands):
+            data = _accepted(cmds)
+    except _Unsure:
+        data, reads = [], []
+    data.sort()
+    marker_spans = sorted(data + reads)
+    left = [run for start, end, run in mentions if not _covered(data if run else marker_spans, start, end)]
+    if not left:
+        return None
+    return APPROVE_WHY if any(left) else MARKER_WHY
+
+
+def check(command):
+    for rx, why in COMPILED:
+        if rx.search(command):
+            return why
+    return approval_violation(command)
+
+
+def main():
+    data = json.load(sys.stdin)
+    command = (data.get("tool_input") or {}).get("command") or ""
+    if not isinstance(command, str):
+        command = json.dumps(command)  # never crash: a crash (exit 1) would not block
+    why = check(command)
+    if why:
+        sys.stderr.write(
+            "BLOCKED by idp-agentic: {}.\nCommand: {}\nAgents prepare work; people merge, approve and deploy. "
+            "Explain to the user what you wanted to do instead.\n".format(why, command)
+        )
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+### H2 steps (human, in your own terminal, after re-approval of the amended spec)
+1. On `feature/IDP-14-guard-bash-false-positive`, replace the whole content of
+   `plugins/idp-agentic/hooks/scripts/guard_bash.py` with the block above. Edit in place to keep the executable bit.
+2. Run the H1 checks again, with these expectations:
+   - the two smoke commands give the same results as for H1;
+   - `make validate-plugin` passes;
+   - the T1 tests are green except the four changed MENTIONS_ONLY cases and the changed timing case, which T4
+     updates.
+
+   Also check two review payloads:
+   ```bash
+   for p in p01_escaped_space_comment p15_git_commit_path; do
+     /usr/bin/python3 plugins/idp-agentic/hooks/scripts/guard_bash.py \
+       < /private/tmp/claude-501/-Users-suyashkunte-Documents-IntelligentDeliveryPipeline/95c2d9e4-6152-4e1e-82f2-2724fa62cd69/scratchpad/review/$p.json
+     echo "$p exit $?"
+   done
+   ```
+   Expected: `BLOCKED ...` and `exit 2` for both.
+3. Commit only that file: `git add plugins/idp-agentic/hooks/scripts/guard_bash.py && git commit -m "IDP-14: relax-only approval guard (amendment 1)"`.
+4. If any check fails, stop and tell the agent (spec revision).
+
+### Tests (T4, agent; `tests/plugin/test_hooks.py`)
+- Add the review payloads (exact strings from the `review/p*.json` files) to the existing lists. Each list's test
+  asserts its specific reason.
+  - `RUNS_APPROVAL` (asserts `spec approval is a human checkpoint`):
+    ```text
+    "echo \\ #; make approve-spec KEY=IDP-1",
+    "echo \\\t#; make approve-spec KEY=IDP-1",
+    "echo x\\\n#; make approve-spec KEY=IDP-1",
+    "(( x = 1 << 2 ))\nmake approve-spec KEY=IDP-1\n2",
+    "(( cat << 2 ))\nmake approve-spec KEY=IDP-1\n2",
+    "> \"'\" make approve-spec KEY=IDP-1",
+    "> $'\\'' make approve-spec KEY=IDP-1",
+    "echo 'make approve-spec KEY=IDP-1' | $SHELL",
+    "echo 'make approve-spec KEY=IDP-1' | sudo -s",
+    "make {approve-spec,}",
+    "m=make; $m approve-spec",
+    ```
+  - `WRITES_MARKER` (asserts `APPROVED marker`):
+    ```text
+    "touch -m specs/IDP-1/APPROVED",
+    "sort -o specs/IDP-1/APPROVED /dev/null",
+    "curl -o specs/IDP-1/APPROVED https://example.com/x",
+    "patch specs/IDP-1/APPROVED /tmp/p.diff",
+    "git commit -m x -- specs/IDP-1/APPROVED",
+    "git diff --output=specs/IDP-1/APPROVED",
+    ```
+  - Not added: p12 `make $'\x61pprove-spec'` (no raw mention; residual risk, as on main). A test asserting that it
+    is allowed would pin a bypass.
+- `UNSURE_MENTIONS` becomes a list of `(command, reason)` pairs; `test_approval_check_fails_closed_when_unsure`
+  asserts returncode 2 and that `reason` is in stderr.
+  - `"approval"` (`spec approval is a human checkpoint`) for every existing case except
+    `'echo "unterminated > specs/IDP-14/APPROVED'`, which gets `"APPROVED marker"`.
+  - New cases (moved from MENTIONS_ONLY, see the spec):
+    - `("echo make approve-spec", APPROVAL)`;
+    - `("grep -rn approve-spec docs", APPROVAL)`;
+    - `("test -f specs/IDP-14/APPROVED && echo approved", MARKER)`.
+  - Further new cases:
+    - `("echo 'make approve-spec KEY=IDP-1' > x.sh; bash x.sh", APPROVAL)` (Q8: a non-inert command disables
+      DATA);
+    - `("{ echo 'make approve-spec'; } | sh", APPROVAL)`;
+    - `("cat <<'EOF' | sh\nmake approve-spec KEY=IDP-1\nEOF", APPROVAL)`;
+    - `("$(cat <<'EOF'\nmake approve-spec KEY=IDP-1\nEOF\n)", APPROVAL)` (a substitution at command position is
+      not a DATA position);
+    - `("git commit -m x -- 'specs/IDP-1/APPROVED'", MARKER)` (a quoted pathspec is not data);
+    - `("tee 'specs/IDP-1/APPROVED' <<'EOF'\nx\nEOF", MARKER)` (tee file arguments are never data);
+    - `("rg --pre 'make approve-spec' x", APPROVAL)` (an output or run option disables DATA).
+- `MENTIONS_ONLY` changes:
+  - `"grep -rn approve-spec docs"` becomes `"grep -rn 'approve-spec' docs"`;
+  - `"echo make approve-spec"` becomes `"echo 'make approve-spec'"`;
+  - `"echo ok # make approve-spec KEY=IDP-14"` is removed (it moves to the comment test);
+  - `"test -f specs/IDP-14/APPROVED && echo approved"` becomes `"test -f specs/IDP-14/APPROVED && echo present"`.
+
+  Add `"echo 'approved'"` and `"cat specs/IDP-14/APPROVED | head -c 10"`. All other cases stay unchanged.
+- `test_mentions_in_comments_block` (tagged `IDP-14:AC-1` and `IDP-14:AC-2`), parametrized `(command, reason)`.
+  Every case must block with its reason:
+  - `("echo ok # make approve-spec KEY=IDP-14", APPROVAL)`;
+  - `("# approve-spec", APPROVAL)`;
+  - `("cat README.md # specs/IDP-14/APPROVED", MARKER)`;
+  - `("cat > pr.md <<'EOF'\nok\nEOF\n# make approve-spec", APPROVAL)`;
+  - `("echo 'x' # it's approve-spec time", APPROVAL)`;
+  - `("git commit -m 'x' # APPROVED", MARKER)`.
+- `test_hook_parses_as_python_39` (tagged `IDP-14:AC-3`, NFR):
+  `ast.parse((SCRIPTS / "guard_bash.py").read_text(), feature_version=(3, 9))` raises nothing, and no
+  `ast.Match` node is present.
+- `test_large_command_is_checked_within_a_second`: the cases become (same ids where unchanged):
+  - `(LARGE_HEREDOC, False)`;
+  - `("echo '" + "make approve-spec " * 11_000 + "'", False)`, id `200kb-quoted-mentions`;
+  - `("echo " + "'approve-spec' " * 20_000, False)`, id `20k-quoted-words`;
+  - `("echo " + "make approve-spec " * 11_000, True)`, id `200kb-unquoted-mentions`;
+  - `("ls " + "make " * 40_000, False)`;
+  - `("echo 'approve-spec " + "x" * 200_000, True)`, id `200kb-unterminated-quote`;
+  - `("echo " + "$(" * 2_000 + "make approve-spec" + ")" * 2_000, True)`;
+  - `("cat" + " <<E" * 2_000 + "\n" + "approve-spec\nE\n" * 2_000, False)`, id `2k-heredocs-with-mentions`.
+- RUNS_APPROVAL, WRITES_MARKER, the AC-4 lists and the remaining MENTIONS_ONLY and UNSURE_MENTIONS cases must pass
+  unchanged with H2. If one does not, stop and report (spec revision), rather than editing the case.
+
+### Changes (amendment 1)
+| File | Change | Who |
+|------|--------|-----|
+| plugins/idp-agentic/hooks/scripts/guard_bash.py | Replaced by the H2 file: relax-only span accounting; non-string command coerced. (AC-1, AC-2, AC-3, AC-4, NFR) | Human (H2) |
+| tests/plugin/test_hooks.py | Review payloads added; UNSURE_MENTIONS with reasons; four MENTIONS_ONLY changes plus two new allowed cases; comment test; Python 3.9 parse test; timing cases updated. (AC-1, AC-2, AC-3) | Agent (T4) |
+| CHANGELOG.md | T3 entry, worded for the relax-only design: `- IDP-14: the Bash guard still blocks any mention of approve-spec or an APPROVED file, except quoted or heredoc text given to commands that only print or record it (cat, echo, printf, grep, git commit -m, gh pr create --body, ...) and plain marker paths given to read-only commands (cat, ls, head, test -f, git status/diff/log/show); comments, unquoted mentions and anything the lexer cannot follow still block. The pr-generate skill uses the Co-Authored-By trailer supplied by the environment. Takes effect in agent sessions after the plugin is updated.` | Agent (T3) |
+
+### Risks (amendment 1)
+- Risk: the lexer misreads where bash's quotes or heredocs end, and so relaxes text that bash runs. Mitigations:
+  - relaxation needs a printer head, an all-inert command and a matching quote or heredoc;
+  - every known divergence raises `_Unsure`: arithmetic, complex `${}`, backticks, process substitution, `case`,
+    heredoc edge cases;
+  - comments follow bash's word-start rule.
+
+  Detection: the review payloads, T4's lists and review loop 2.
+- Risk: more false positives than H1, for unquoted mentions, mentions in comments, and mention-only commands combined
+  with other commands (Q7, Q8). All of these block on main too, so nothing is worse than before IDP-14.
+- Risk: residual indirection with no raw mention (p12 and similar). This is unchanged from main; the backstops are
+  as before.

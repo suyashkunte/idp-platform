@@ -1,49 +1,57 @@
 # IDP-14: tasks
 
-Status: awaiting human spec approval (guided mode).
-- H1 is a HUMAN task on a protected path (`plugins/idp-agentic/hooks/**`). It comes first, right after approval, so
-  the new tests are green as soon as they are written, and the Definition of Done Stop hook does not block every turn.
-- T1-T3 are agent tasks.
-- If H1's checks fail, or T1 finds a case where the hook disagrees with the spec, stop and revise the spec
-  (re-approval needed, and a new H1 paste by the human).
+Status:
+- Done: spec approved (cb63815), H1 (d1c83f5), T1 (1b11b14), T2 (57c8532).
+- Spec amended 2026-10-20 (amendment 1, relax-only, after review loop 1): `status: DRAFT`, so re-approval is needed.
+- Open:
+  - H2 is a HUMAN task on a protected path. It comes right after re-approval;
+  - T4 updates the tests to the amended spec;
+  - T3 (docs) comes last;
+  - then verify and review loop 2.
+- Between H2 and T4, the four changed MENTIONS_ONLY cases, the moved comment case and the changed timing case are
+  red by design.
+- If H2's checks fail, or any unchanged test case disagrees with H2, stop and revise the spec.
 
-Test names and exact case lists are in plan.md ("Tests").
+Test names and exact case lists are in plan.md ("Tests", and "Amendment 1" / "Tests (T4)").
 
-- [ ] H1 HUMAN, protected path, right after `make approve-spec KEY=IDP-14`.
+- [x] H1 HUMAN, protected path, right after `make approve-spec KEY=IDP-14`.
   - Replace `plugins/idp-agentic/hooks/scripts/guard_bash.py` with the complete file in plan.md ("H1").
   - Run the plan.md H1 checks: executable bit, `ruff format --check`, `ruff check`, the Python 3.9 `ast.parse`, the two
-    smoke commands with `/usr/bin/python3` (expect `exit 0`, then `BLOCKED ...` and `exit 2`), and
-    `make validate-plugin` (green).
-  - Commit only that file as `IDP-14: judge spec approval by what a command runs or writes`.
-  - Optional (spec Q5, if confirmed): bump the plugin version to 0.1.1 in `plugin.json` and `marketplace.json`.
-  - (AC-1, AC-2, AC-3, AC-4) Files: plugins/idp-agentic/hooks/scripts/guard_bash.py (optionally
-    plugins/idp-agentic/.claude-plugin/plugin.json, .claude-plugin/marketplace.json).
-- [ ] T1 Guard tests (after H1).
-  - Add the `bash()` helper, the case lists and the tests to `tests/plugin/test_hooks.py`:
-    - `test_running_spec_approval_is_blocked` (AC-1);
-    - `test_writing_the_approved_marker_is_blocked` (AC-2);
-    - `test_mentioning_approval_as_text_is_allowed` (AC-3);
-    - `test_approval_check_fails_closed_when_unsure` (AC-1, AC-2);
-    - `test_large_command_is_checked_within_a_second` (AC-3, NFR);
-    - `test_large_heredoc_is_allowed_by_the_hook` (AC-3).
-  - Stack `@pytest.mark.ac("IDP-14:AC-4")` on the two existing guard tests. Their lists and bodies stay unchanged.
-  - Red-first evidence, recorded for the PR:
-    - write the pre-H1 hook to the scratchpad with `git show <commit before H1>:plugins/idp-agentic/hooks/scripts/guard_bash.py`;
-    - pipe every new case into it in a scratchpad loop, without editing the hook;
-    - expect the AC-3 cases (mention-only, reading the marker) to be blocked by the old hook, and bypass cases such as
-      `make -s approve-spec`, `make 'approve-spec'`, `cd specs/IDP-1 && touch APPROVED` and
-      `cat <(make approve-spec ...)` to be allowed by it.
+    smoke commands with `/usr/bin/python3`, and `make validate-plugin`.
+  - Commit only that file.
+  - (AC-1, AC-2, AC-3, AC-4) Files: plugins/idp-agentic/hooks/scripts/guard_bash.py.
+  - Done d1c83f5. Superseded by H2 (amendment 1).
+- [x] T1 Guard tests (after H1): the AC-1..AC-3 lists, the fail-closed, timing and large-heredoc tests, and the
+  stacked `IDP-14:AC-4` marks.
+  - (AC-1, AC-2, AC-3, AC-4) Files: tests/plugin/test_hooks.py.
+  - Done 1b11b14. Extended by T4.
+- [x] T2 `pr-generate` trailer: step 1 of SKILL.md and `test_pr_generate_uses_environment_co_author_trailer`.
+  - (AC-5) Files: plugins/idp-agentic/skills/pr-generate/SKILL.md, tests/plugin/test_structure.py.
+  - Done 57c8532.
+- [ ] H2 HUMAN, protected path, right after re-approval of the amended spec.
+  - Replace `plugins/idp-agentic/hooks/scripts/guard_bash.py` with the complete file in plan.md ("Amendment 1" /
+    "H2").
+  - Run the plan.md H2 checks: the H1 checks, the two smoke commands, and the review payload check (p01, p15: both
+    must exit 2).
+  - Commit only that file as `IDP-14: relax-only approval guard (amendment 1)`.
+  - (AC-1, AC-2, AC-3, AC-4) Files: plugins/idp-agentic/hooks/scripts/guard_bash.py.
+- [ ] T4 Tests for the relax-only guard (after H2), in `tests/plugin/test_hooks.py`:
+  - Add the review payloads: p01-p06, p09-p11 and p17 to `RUNS_APPROVAL`; p07, p08 and p13-p16 to `WRITES_MARKER`.
+    p12 is not added (residual risk; a test would pin a bypass).
+  - Turn `UNSURE_MENTIONS` into `(command, reason)` pairs and assert the reason. Add the three cases moved from
+    MENTIONS_ONLY and the seven new fail-closed cases from plan.md.
+  - Apply the four MENTIONS_ONLY changes and add the two new allowed cases.
+  - Add `test_mentions_in_comments_block` (AC-1, AC-2) and `test_hook_parses_as_python_39` (AC-3, NFR).
+  - Update the timing cases.
+  - Do not edit any other existing case. If one fails with H2, stop and report.
+  - Red-first evidence for the PR: run the new block cases against the H1 hook (`git show d1c83f5:<path>` into the
+    scratchpad); the 14 regressions are allowed there.
   - Run `uv run pytest tests/plugin --no-cov`, `uv run ruff check tests/plugin`,
     `uv run ruff format --check tests/plugin` and `uv run idp test-quality-lint tests/plugin/test_hooks.py`.
-  - If a case disagrees with the spec, stop (see Status).
-  - (AC-1, AC-2, AC-3, AC-4) Files: tests/plugin/test_hooks.py.
-- [ ] T2 `pr-generate` trailer.
-  - Add `test_pr_generate_uses_environment_co_author_trailer` to `tests/plugin/test_structure.py` and see it fail.
-  - Replace step 1 of `plugins/idp-agentic/skills/pr-generate/SKILL.md` with the plan.md text, and see the test pass.
-  - Confirm that `test_every_skill_has_name_and_description` stays green.
-  - (AC-5) Files: plugins/idp-agentic/skills/pr-generate/SKILL.md, tests/plugin/test_structure.py.
-- [ ] T3 Docs and final checks.
-  - Add the plan.md IDP-14 entry under a new `### Fixed` in `[Unreleased]` in `CHANGELOG.md`. It includes the
-    "takes effect after the plugin is updated" note (spec Q4).
+  - (AC-1, AC-2, AC-3) Files: tests/plugin/test_hooks.py.
+- [ ] T3 Docs and final checks (after T4).
+  - Add the IDP-14 entry under a new `### Fixed` in `[Unreleased]` in `CHANGELOG.md`. Use the amendment 1 wording in
+    plan.md ("Changes (amendment 1)"), including the "takes effect after the plugin is updated" note (spec Q4).
   - Run `make verify` (green, including `idp spec-trace IDP-14` with AC-1..AC-5 OK).
   - (AC-1..AC-5) Files: CHANGELOG.md.
+- [ ] Review loop 2 (orchestrator) on the H2 hook and the T4 tests.

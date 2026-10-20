@@ -45,6 +45,110 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-14-guard-bash-f
 - Tooling: ruff (`line-length = 120`, hooks ignore `UP`, `S603`, `S607`). mypy, coverage and bandit cover `packages`
   only. `make validate-plugin` runs `tests/plugin`.
 
+## Amendment 1 (2026-10-20, after review loop 1)
+State: the spec was approved (cb63815), H1 is committed (d1c83f5), the T1 tests are committed (1b11b14) and the T2
+SKILL.md change is done (57c8532).
+
+Review loop 1 found 14 confirmed regressions. Each is blocked on main, allowed by the H1 hook, and really runs the
+approval or writes the marker in bash or zsh. Payloads are in the review scratchpad (`review/p*.json`). The H1 design
+decided by itself that some commands were safe ("not a runner", "not a writer"), so every gap in its model became a
+bypass.
+
+**Decision (human): relax-only.** The base is again the pre-IDP-14 idea that a mention blocks. The lexer may only
+*relax* specific mentions; it never decides on its own that a command is safe.
+
+**Invariant:** every raw mention must lie inside a relaxed span that the lexer found, or the command blocks.
+- **Raw mention:** a case-insensitive match, over the raw command, of `approve-spec` or of a word whose last path
+  component is `APPROVED`. The regex is `approve-spec|(?<![\w.-])approved(?![\w.-])`, so
+  `cd specs/IDP-1 && touch APPROVED` still blocks. Match spans (offsets) are recorded.
+- **Relaxed spans** (the only ones):
+  - (a) **DATA:** a heredoc body, or the interior of a quoted string, given to a narrow printer command. All of
+    these must hold:
+    - (i) text the shell expands (double quotes, unquoted-delimiter heredoc bodies) contains no `$(`, backtick or
+      `${`; otherwise it is code. Single quotes, `$'...'` and quoted-delimiter heredoc bodies are literal, so
+      backticks in them are data (ASSUMPTION A9);
+    - (ii) the printer has no output-writing or command-running option: a word matching
+      `-o.*|--output.*|of=.*|-w|--pre.*|-O.*|--open-files-in-pager.*`. `sort` is not a printer;
+    - (iii) its output cannot reach code. Every simple command in the whole input must be "inert" (Q8): a printer,
+      a reader, `tee`, `cd`, `mkdir`, `pwd`, `false`, `git log|show|status|diff|grep|commit|tag|notes` or
+      `gh pr|issue|release`. Its head must be a plain unquoted word, with no `VAR=x` prefix. So `| sh`, `| $SHELL`,
+      `| sudo -s`, `| xargs`, `; bash x.sh`, `$m ...`, compound commands (`if`, `for`, `{ }`) and assignments disable
+      every DATA relaxation;
+    - (iv) the data is not a redirect target. Text inside `$( )` counts only if that `$( )` is itself in a DATA
+      position of an outer printer, as in `git commit -m "$(cat <<'EOF' ... EOF\n)"`.
+
+    Printers and their DATA positions:
+    - `cat`, `echo`, `printf`, `grep`, `egrep`, `fgrep`, `rg`, `head`, `tail`, `wc`, `jq`, `test`, `[`, `[[`,
+      `true`, `:`: every argument, and heredoc stdin;
+    - `tee`: heredoc stdin only (its file arguments are never relaxed);
+    - `git log|show|status|diff|grep`: every argument after the subcommand;
+    - `git commit|tag|notes`: only the value of `-m`/`--message` (`--message=`). A quoted pathspec is never data;
+    - `gh pr|issue|release create|edit|comment`: the values of `--body`/`--title`/`-b`/`-t`, and heredoc stdin when
+      `--body-file -` or `-F -` is given.
+  - (b) **READ:** a plain unquoted word, not starting with `-` and not a redirect target, that is an argument of a
+    read command. Read commands are `cat`, `ls`, `head`, `tail`, `wc`, `grep`, `egrep`, `fgrep`, `rg`,
+    `test`/`[`/`[[` (only right after `-f`, `-e` or `-s`) and `git status|diff|log|show`, each without an option
+    from (ii). READ relaxes marker mentions only, never `approve-spec` (ASSUMPTION A11). It does not depend on (iii),
+    because reading the marker cannot run anything.
+- **Never relaxed:**
+  - comments;
+  - words of any other command (`make`, `touch`, `curl`, `patch`, `sort`, a `git commit` pathspec, `$m`, ...);
+  - redirect targets;
+  - assignment values;
+  - anything when the lexer is unsure. Unsure means: unterminated quote or heredoc, `((`, `$((`, complex `${...}`,
+    a backtick outside literal text, `<(`/`>(`, more than 8 nested `$( )`, a `case` command, a heredoc delimiter
+    containing `$`, a heredoc pending across `$( )` levels, or an unquoted-delimiter heredoc body containing a
+    backslash. Unsure means nothing is relaxed at all, which is the pre-IDP-14 behaviour.
+- **Writers:** a writer list is no longer needed. A mention in any command that is not listed above simply blocks.
+- **Reason:** `spec approval is a human checkpoint (A)` if any unrelaxed mention is `approve-spec`, otherwise the
+  APPROVED-marker reason.
+- **Unchanged:** the other `RULES` (AC-4), which still run first on the raw command. Also unchanged: stdlib-only
+  Python 3.9, under 1 s, ruff-clean.
+- **Non-string command:** a non-string `command` (review c06: a JSON list crashed the hook, which exits 1 and
+  therefore does not block) is now turned into its JSON text first, so a mention in it blocks (ASSUMPTION A10).
+
+Review payloads, all handled by the invariant. Placement in the tests is in plan.md.
+- Must block (the 14 regressions):
+  - p01 `echo \ #; make approve-spec KEY=IDP-1`, p02 (the same with an escaped tab), p03 `echo x\` + newline +
+    `#; make approve-spec ...`: the lexer tracks word boundaries, so `#` after an escape or a line continuation is
+    not a comment. In any case a mention in a comment is never relaxed;
+  - p04 `(( x = 1 << 2 ))` + newline + `make approve-spec ...` and p04b `(( cat << 2 ))` + newline +
+    `make approve-spec ...`: `((` makes the lexer unsure;
+  - p05 `> "'" make approve-spec ...` and p06 `> $'\'' make approve-spec ...`: the mention is an argument of `make`;
+  - p07 `touch -m specs/IDP-1/APPROVED`, p08 `sort -o specs/IDP-1/APPROVED /dev/null`,
+    p13 `curl -o specs/IDP-1/APPROVED https://example.com/x`, p14 `patch specs/IDP-1/APPROVED /tmp/p.diff`: not read
+    commands;
+  - p15 `git commit -m x -- specs/IDP-1/APPROVED`: a pathspec is not READ, and `commit` is not a read subcommand;
+  - p16 `git diff --output=specs/IDP-1/APPROVED`: an output option disables READ;
+  - p09 `echo 'make approve-spec KEY=IDP-1' | $SHELL` and p10 `... | sudo -s`: a non-inert command disables DATA.
+- Must now block too (allowed on main; a raw mention in a non-printer):
+  - p11 `make {approve-spec,}`;
+  - p17 `m=make; $m approve-spec`.
+- Residual risk, as on main: p12 `make $'\x61pprove-spec'` has no raw mention, so nothing blocks it. The backstops
+  are the `CLAUDECODE` refusal in `idp approve-spec` and the deny-list.
+
+### Amendment log
+- Amendment 1 (2026-10-20, after review loop 1): relax-only design and invariant. AC-1..AC-5 text unchanged; the
+  AC-1..AC-3 sub-bullets get an "Amendment 1" note. Q2 superseded. A3, A4 and A5 superseded. The `-m` sub-rule of
+  AC-2 superseded. A9-A11 and Q7-Q8 added. NFR timing cases updated. Four MENTIONS_ONLY cases change (see
+  "MENTIONS_ONLY under amendment 1"). H2 and T4 added.
+
+### MENTIONS_ONLY under amendment 1
+Every case in `tests/plugin/test_hooks.py::MENTIONS_ONLY` was checked against the new rules. 23 stay allowed as
+they are. Four would now block and change as follows (none is silently dropped):
+- `grep -rn approve-spec docs`: an unquoted mention, and READ covers only the marker. It becomes
+  `grep -rn 'approve-spec' docs` in MENTIONS_ONLY. The original moves to UNSURE_MENTIONS (expected:
+  `spec approval is a human checkpoint`).
+- `echo make approve-spec`: unquoted. It becomes `echo 'make approve-spec'`; the original moves to UNSURE_MENTIONS
+  (approval reason).
+- `echo ok # make approve-spec KEY=IDP-14`: comments are never relaxed. It moves to the new comment test (blocks).
+- `test -f specs/IDP-14/APPROVED && echo approved`: the marker path is relaxed (READ), but the bare word `approved`
+  is itself a marker mention (case-insensitive) given to `echo` unquoted. It becomes
+  `test -f specs/IDP-14/APPROVED && echo present`; the original moves to UNSURE_MENTIONS (marker reason).
+
+Q7 asks whether unquoted plain words given to printers should be relaxed too, which would keep the first, second
+and fourth cases unchanged.
+
 ## Requirements
 - **AC-1** Given a command that _executes_ `make approve-spec`, `uv run idp approve-spec` or `idp approve-spec` (at command start, or after `;`, `&&`, `||`, `|` or `$(`), when guard_bash runs, then it blocks.
   - "Executes" is judged per simple command, after a small lexer has removed heredoc bodies and quoted text (plan.md
@@ -70,6 +174,10 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-14-guard-bash-f
     `xargs idp approve-spec` block when they mention approval. Inside those, nothing is treated as mere text (Q2).
   - Verified by `test_running_spec_approval_is_blocked` (each form above, also nested `$( )` and wrappers) and
     `test_approval_check_fails_closed_when_unsure`.
+  - Amendment 1: the bullets above describe the H1 design and are superseded. AC-1 now holds because every
+    `approve-spec` mention blocks unless it lies in a DATA span (see "Amendment 1"). A runner never gets a relaxed
+    position. All forms listed above still block, and so do p01-p06, p09-p11 and p17. Also verified by
+    `test_mentions_in_comments_block`.
 - **AC-2** Given a command that writes, copies, moves, tees or redirects INTO `specs/<KEY>/APPROVED`, when guard_bash runs, then it blocks.
   - Blocks with ``the APPROVED marker is written only by `make approve-spec`, run by a human`` when, after lexing:
     - a redirection `>`, `>>`, `>|`, `&>`, `n>` targets a marker word, also quoted (`> "specs/X/APPROVED"`) or with a
@@ -86,6 +194,10 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-14-guard-bash-f
   - `git add` of the marker stays blocked by design. `rm`/`git rm` of the marker and copying *from* it with
     `cp`/`mv`/`rsync`/`ln` also block (ASSUMPTION A3).
   - Verified by `test_writing_the_approved_marker_is_blocked`.
+  - Amendment 1: the writer list and the "`-m` value is never a marker word" rule are superseded. A marker mention
+    blocks unless it is DATA or READ. A redirect target is never relaxed, and READ excludes options, so
+    `touch -m`, `sort -o`, `curl -o`, `patch`, `git commit ... -- <marker>` and `git diff --output=<marker>` block
+    (p07, p08, p13-p16). Copying from the marker and `rm` of it still block (they are not read commands).
 - **AC-3** Given a heredoc or quoted string that only mentions `make approve-spec` or `APPROVED` as text (e.g. `cat > pr.md <<'EOF' ... run make approve-spec ... EOF`, `git commit -m "... APPROVED ..."`), when guard_bash runs, then it is allowed.
   - Heredoc bodies are data when the delimiter is quoted (`<<'EOF'`, `<<"EOF"`, `<<\EOF`), and also when it is not
     quoted, provided the body contains no `$(`, backtick, `${` or backslash (bash would expand those). `<<-` (tab
@@ -111,6 +223,12 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-14-guard-bash-f
   - The other `RULES` still run on the raw command (AC-4). A PR body that quotes `.github/`, `gh pr merge` or
     `git push origin main` is still blocked by those rules (Q1). The AC-3 test bodies avoid them.
   - Verified by `test_mentioning_approval_as_text_is_allowed`.
+  - Amendment 1: the printer list and conditions are now those of rule (a) in "Amendment 1". `sort`, `diff`,
+    `git stash` and the `gh view|list|close|reopen` verbs are dropped, and `git commit|tag|notes` is limited to the
+    message value.
+    - Plain quoted words (`'approve-spec'`) are data again; that is safe because a printer only prints them.
+    - Unquoted mentions given to printers and mentions in comments now block (A4 superseded, Q7).
+    - Four MENTIONS_ONLY cases change (see "MENTIONS_ONLY under amendment 1"); all others stay allowed.
 - **AC-4** Given the existing blocked/allowed command lists in `tests/plugin/test_hooks.py`, then they all still pass.
   - The two lists and both test bodies stay unchanged (no command added, removed or edited). Each test gains a stacked
     `@pytest.mark.ac("IDP-14:AC-4")` next to its existing `IDP-10:AC-3` mark, so `idp spec-trace IDP-14` sees AC-4.
@@ -153,19 +271,37 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-14-guard-bash-f
 - ASSUMPTION A2: AC-1's "executes" includes the wrapper, path, case and quoted/escaped-word forms listed under AC-1.
   It also includes text that may reach a shell or interpreter; that text is handled by the fallback, not by
   interpretation.
-- ASSUMPTION A3: AC-2 deliberately also blocks `rm`/`git rm` of the marker (blocked today), copying from it with
+- Amendment 1: the edge-case bullets above about the unsure fallback and escapes describe H1. Under the new design:
+  - unsure means "relax nothing";
+  - escapes are kept as part of the word (so `#` after them is not a comment);
+  - the `.`-word rule is gone (non-inert commands simply disable DATA).
+  The indirection bullet still holds (p12 and other forms without a raw mention). p17 (`$m approve-spec`) now
+  blocks, because the raw mention is not relaxed.
+- ASSUMPTION A3 (superseded by amendment 1: no writer list; any marker mention outside DATA/READ blocks, so `rm`,
+  copying from the marker and any unlisted writer block): AC-2 deliberately also blocks `rm`/`git rm` of the marker (blocked today), copying from it with
   `cp`/`mv`/`rsync`/`ln` (a marker word anywhere after the writer), and writing any file named `APPROVED` (also
   relative to the current directory). All of these are fail-closed choices; reading stays allowed.
-- ASSUMPTION A4: unquoted mentions given to printers are allowed, because they do not execute. AC-3 names only
-  heredocs and quoted strings, but AC-1 blocks only execution.
-- ASSUMPTION A5: the fallback mention check is slightly broader than the old rule 1. It matches `approve-spec`
-  anywhere, not only after `make`/`idp`, so `echo approve-spec | xargs make` blocks.
+- ASSUMPTION A4 (superseded by amendment 1: unquoted mentions given to printers block; see Q7): unquoted mentions
+  given to printers are allowed, because they do not execute. AC-3 names only heredocs and quoted strings, but AC-1
+  blocks only execution.
+- ASSUMPTION A5 (superseded by amendment 1: the mention regex is now the base check for every command, matching
+  `approve-spec` anywhere and any word whose last path component is `APPROVED`, case-insensitive): the fallback
+  mention check is slightly broader than the old rule 1. It matches `approve-spec` anywhere, not only after
+  `make`/`idp`, so `echo approve-spec | xargs make` blocks.
 - ASSUMPTION A6: the protected-path rule and the other raw rules are unchanged (AC-4). Their false positives on
   quoted or heredoc text are a separate decision (Q1).
 - ASSUMPTION A7: if the environment supplies no `Co-Authored-By` trailer, the agent adds none. The PR's AI disclosure
   and the `ai-assisted` label still record AI involvement.
 - ASSUMPTION A8: the running session uses the installed plugin copy (`CLAUDE_PLUGIN_ROOT`). So the fix reaches agent
   sessions only after merge and a plugin update; the tests exercise the repository copy (Q4, Q5).
+- ASSUMPTION A9 (amendment 1): rule (a)(i) ("no `$(`, backtick or `${`") applies only to text the shell expands:
+  double-quoted strings and bodies of heredocs whose delimiter is unquoted. Single-quoted strings, `$'...'` and
+  quoted-delimiter heredoc bodies are literal for the shell, so backticks in them (markdown in PR bodies) are data.
+  Read literally, (i) would block every PR body with code spans, which is the ticket's main case.
+- ASSUMPTION A10 (amendment 1): a non-string `tool_input.command` is turned into its JSON text before checking,
+  instead of crashing (exit 1 does not block).
+- ASSUMPTION A11 (amendment 1): READ (rule b) relaxes only marker mentions, as the decision says ("an unquoted marker
+  word"). An unquoted `approve-spec` given to a read command (for example as a grep pattern) blocks.
 
 ## Non-functional requirements
 - The hook stays stdlib-only (`json`, `re`, `sys`) and Python 3.9-compatible: no `match`, no `X | Y` types, no
@@ -179,6 +315,18 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-14-guard-bash-f
   - a 200 KB unterminated quote;
   - 2 000 nested `$(`;
   - 2 000 heredocs on one line.
+  Amendment 1: the cases are now:
+  - the 200 KB quoted heredoc (allowed);
+  - 200 KB of mentions inside one quoted string (allowed);
+  - 20 000 quoted mention words (allowed);
+  - 200 KB of unquoted mentions (blocked);
+  - 40 000 words without a mention (allowed);
+  - a 200 KB unterminated quote holding a mention (blocked);
+  - 2 000 nested `$(` (blocked);
+  - 2 000 heredocs whose bodies mention approval (allowed).
+
+  Mentions are checked against the relaxed spans with `bisect`, so many mentions times many spans stays fast. A
+  command with no raw mention skips the lexer. `test_hook_parses_as_python_39` checks the Python 3.9 syntax.
   The lexer and all regexes are linear (no nested unbounded quantifiers; heredoc terminators are found line by line).
   The end-to-end hook (interpreter start included) stays far below the 10 s `hooks.json` timeout. The test does not
   time subprocess start-up, which would make it flaky.
@@ -201,7 +349,9 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-14-guard-bash-f
   its own ACs and AC-4-style regression lists. This ticket stays limited to the approval rules: the smallest change,
   matching AC-1..AC-3. Alternative: about 10 more lines in H1 for the protected-path rule only, plus a new AC (ticket
   change).
-- Q2 (fail-closed lists): please confirm three lists in plan.md:
+- Q2 (superseded by amendment 1, resolved: relax-only, so there is no writer list or interpreter list any more.
+  Only the printer, reader and inert lists remain, and a missing entry can only cause a false positive, never a
+  bypass): please confirm three lists in plan.md:
   - the "may run text" list (shells, interpreters, `xargs`, `eval`, `source`, `.`, `ssh`, `su`, `script`, `at`,
     `crontab`, `alias`, `make -f/-E/--eval`, `git -c/-x/--exec/bisect/foreach/filter-branch`);
   - the printer allow-list;
@@ -212,7 +362,8 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-14-guard-bash-f
   Extend the lists later as needed.
 - Q3 (unsure behaviour): for unterminated quotes or heredocs and the other unsure cases, fall back to the mention
   check: block if the raw text contains `approve-spec` or `specs/<x>/APPROVED`. Recommendation: yes. It is today's
-  behaviour, slightly broadened (A5), and never weaker.
+  behaviour, slightly broadened (A5), and never weaker. (Resolved by amendment 1: unsure relaxes nothing, so every
+  raw mention blocks.)
 - Q4 (installed copy): hooks run from `${CLAUDE_PLUGIN_ROOT}` (installed from the marketplace), while the tests run
   the repository copy. Add a plugin-side check that the hook a session runs equals the repo one? Recommendation: not
   in this ticket. The install path is per machine and absent in CI. Note "update the plugin after merge" in the
@@ -224,12 +375,23 @@ Facts checked in the repository (2026-10-20, branch `feature/IDP-14-guard-bash-f
   of H1, if Claude Code refreshes plugins only on a version change. Please confirm how you update the plugin.
 - Q6 (no trailer supplied): if the environment supplies no `Co-Authored-By` trailer, add none? Recommendation: yes
   (A7). Inventing one is exactly what AC-5 removes.
+- Q7 (amendment 1, unquoted words): should a plain unquoted word given to a printer or read command also be relaxed
+  (DATA), for example `echo make approve-spec`, `grep -rn approve-spec docs` or `echo approved`? Recommendation: no.
+  Keep the human's narrow rule; quoting costs the agent two characters, and every extra relaxation is another place
+  where the lexer must match the shell exactly. The three MENTIONS_ONLY cases change to quoted forms instead.
+- Q8 (amendment 1, inert-all rule): the decision's (a)(iii) names pipelines. The plan widens it: DATA relaxation is
+  allowed only if every simple command in the input is inert. That also covers writing a script and running it in
+  the same command (`echo 'make approve-spec' > x.sh; sh x.sh`), groups and loops piped into a shell
+  (`{ echo '...'; } | sh`, `for ...; done | sh`), and commands whose head is computed (`$SHELL`, `$m`).
+  Recommendation: yes. It is simpler than tracking pipelines and groups, and it only costs false positives when a
+  mention-only command is combined with another command (for example `make verify && git commit -m "..."`, which
+  still blocks, as on main).
 
 ## Traceability
 | AC | Planned tests |
 |----|---------------|
-| AC-1 | tests/plugin/test_hooks.py::test_running_spec_approval_is_blocked, tests/plugin/test_hooks.py::test_approval_check_fails_closed_when_unsure |
-| AC-2 | tests/plugin/test_hooks.py::test_writing_the_approved_marker_is_blocked, tests/plugin/test_hooks.py::test_approval_check_fails_closed_when_unsure |
-| AC-3 | tests/plugin/test_hooks.py::test_mentioning_approval_as_text_is_allowed, tests/plugin/test_hooks.py::test_large_command_is_checked_within_a_second (NFR) |
+| AC-1 | tests/plugin/test_hooks.py::test_running_spec_approval_is_blocked, tests/plugin/test_hooks.py::test_approval_check_fails_closed_when_unsure, tests/plugin/test_hooks.py::test_mentions_in_comments_block (amendment 1) |
+| AC-2 | tests/plugin/test_hooks.py::test_writing_the_approved_marker_is_blocked, tests/plugin/test_hooks.py::test_approval_check_fails_closed_when_unsure, tests/plugin/test_hooks.py::test_mentions_in_comments_block (amendment 1) |
+| AC-3 | tests/plugin/test_hooks.py::test_mentioning_approval_as_text_is_allowed, tests/plugin/test_hooks.py::test_large_command_is_checked_within_a_second (NFR), tests/plugin/test_hooks.py::test_large_heredoc_is_allowed_by_the_hook, tests/plugin/test_hooks.py::test_hook_parses_as_python_39 (NFR, amendment 1) |
 | AC-4 | tests/plugin/test_hooks.py::test_dangerous_commands_are_blocked, tests/plugin/test_hooks.py::test_normal_commands_are_allowed (lists unchanged; `IDP-14:AC-4` mark stacked) |
 | AC-5 | tests/plugin/test_structure.py::test_pr_generate_uses_environment_co_author_trailer |
