@@ -62,8 +62,11 @@ line each, and make is not run. The ones specific to how make reads Makefiles, a
 | `include '<word>' is outside the service directory` (also `~/x.mk`, `./~/x.mk`) | copy the file into the service directory and include it by a relative path |
 | `missing required target '<t>'` although the rule exists | the rule is on a line swallowed by a comment ending in `\`, inside a `define` body, or starts with a blank after a continuation: write it as a plain column-0 rule |
 
-Residual risk, now narrowed to what the static scan does not model: glob include words without `$` are skipped,
-includes produced by `$(eval ...)` or by evaluated `define` bodies are not scanned, `override IDP_PROFILE_DIR` or
+`idp validate` and `idp conformance` are a fail-closed, best-effort correctness check, not a security boundary; the
+boundary is the conformance sandbox (IDP-23) and least-privilege roles
+([ADR-0013](../adr/0013-conformance-trust-model.md)). Residual risk, now narrowed to what the static scan does not
+model: glob include words without `$` are skipped, includes produced by `$(eval ...)` or by evaluated `define` bodies
+are not scanned, `override IDP_PROFILE_DIR` or
 `$(eval ...)` can make `$(IDP_PROFILE_DIR)` name another directory than the pinned one, and make's default include
 directories, archive syntax (`lib(x.mk)`), `.RECIPEPREFIX`/`load`/`guile`, a top-level tab-indented `define` and
 make 4.x on macOS are not modelled (see the residual-risk list in
