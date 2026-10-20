@@ -78,3 +78,5 @@ versions follow [Semantic Versioning](https://semver.org/).
   unquoted mentions and anything the lexer cannot follow still block, and `test`/`[`/`[[` and `printf -v` never relax
   quoted text. The pr-generate skill uses the Co-Authored-By trailer supplied by the environment. Takes effect in
   agent sessions after the plugin is updated.
+- `idp-agentic` plugin version 0.1.0 → 0.1.1 (plugin manifest and marketplace), so installed copies pick up the
+  IDP-14 guard on the next plugin update (IDP-14 Q5).
