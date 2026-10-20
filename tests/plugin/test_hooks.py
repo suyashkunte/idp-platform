@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import subprocess
 import time
@@ -135,6 +136,17 @@ RUNS_APPROVAL = [
     "git -c alias.x='!make approve-spec KEY=IDP-1' x",
     "env -S 'make approve-spec KEY=IDP-1'",
     "find . -exec make approve-spec KEY=IDP-1 \\;",
+    "echo \\ #; make approve-spec KEY=IDP-1",
+    "echo \\\t#; make approve-spec KEY=IDP-1",
+    "echo x\\\n#; make approve-spec KEY=IDP-1",
+    "(( x = 1 << 2 ))\nmake approve-spec KEY=IDP-1\n2",
+    "(( cat << 2 ))\nmake approve-spec KEY=IDP-1\n2",
+    '> "\'" make approve-spec KEY=IDP-1',
+    "> $'\\'' make approve-spec KEY=IDP-1",
+    "echo 'make approve-spec KEY=IDP-1' | $SHELL",
+    "echo 'make approve-spec KEY=IDP-1' | sudo -s",
+    "make {approve-spec,}",
+    "m=make; $m approve-spec",
 ]
 
 WRITES_MARKER = [
@@ -169,6 +181,12 @@ WRITES_MARKER = [
     "cd specs/IDP-1 && touch APPROVED",
     "cd specs/IDP-1 && echo ok > APPROVED",
     "python3 -c \"open('specs/IDP-1/APPROVED', 'w')\"",
+    "touch -m specs/IDP-1/APPROVED",
+    "sort -o specs/IDP-1/APPROVED /dev/null",
+    "curl -o specs/IDP-1/APPROVED https://example.com/x",
+    "patch specs/IDP-1/APPROVED /tmp/p.diff",
+    "git commit -m x -- specs/IDP-1/APPROVED",
+    "git diff --output=specs/IDP-1/APPROVED",
 ]
 
 PR_BODY = (
@@ -193,34 +211,57 @@ MENTIONS_ONLY = [
     "gh pr create --draft --title 'IDP-14: x' --body \"Run make approve-spec KEY=IDP-14 after review\"",
     "gh pr create --draft --title x --body-file - <<'EOF'\nmake approve-spec KEY=IDP-14\nEOF",
     "grep -rn 'make approve-spec' docs plugins",
-    "grep -rn approve-spec docs",
+    "grep -rn 'approve-spec' docs",
     "rg 'specs/.*/APPROVED' docs",
     "printf '%s\\n' 'make approve-spec KEY=IDP-14' > notes.md",
     "echo 'run make approve-spec when ready'",
-    "echo make approve-spec",
-    "echo ok # make approve-spec KEY=IDP-14",
+    "echo 'make approve-spec'",
     "cat specs/IDP-14/APPROVED",
     "ls specs/*/APPROVED",
     "head -c 200 specs/IDP-14/APPROVED",
-    "test -f specs/IDP-14/APPROVED && echo approved",
+    "test -f specs/IDP-14/APPROVED && echo present",
     "git status --short specs/IDP-14/APPROVED",
     "git diff -- specs/IDP-14/APPROVED",
     "git log --oneline -- specs/IDP-14/APPROVED",
+    "echo 'approved'",
+    "cat specs/IDP-14/APPROVED | head -c 10",
 ]
 
+APPROVAL = "spec approval is a human checkpoint"
+MARKER = "APPROVED marker"
+
 UNSURE_MENTIONS = [
-    "echo 'unterminated make approve-spec KEY=IDP-14",
-    'echo "unterminated > specs/IDP-14/APPROVED',
-    "cat > pr.md <<'EOF'\nmake approve-spec KEY=IDP-14\n",
-    "cat > pr.md <<EOF\nRun `make approve-spec KEY=IDP-14` first.\nEOF",
-    'echo "`date`: make approve-spec KEY=IDP-14"',
-    "echo ${X:-make approve-spec}",
-    "echo $(( 1 + 2 )) make approve-spec",
-    'x="$(case y in y) make approve-spec;; esac)"',
-    "echo " + "$(" * 9 + "make approve-spec" + ")" * 9,
-    "uv run pytest -k 'make approve-spec'",
-    "sed 's/x/make approve-spec/e' notes.md",
-    "python3 - <<'EOF'\nprint('make approve-spec')\nEOF",
+    ("echo 'unterminated make approve-spec KEY=IDP-14", APPROVAL),
+    ('echo "unterminated > specs/IDP-14/APPROVED', MARKER),
+    ("cat > pr.md <<'EOF'\nmake approve-spec KEY=IDP-14\n", APPROVAL),
+    ("cat > pr.md <<EOF\nRun `make approve-spec KEY=IDP-14` first.\nEOF", APPROVAL),
+    ('echo "`date`: make approve-spec KEY=IDP-14"', APPROVAL),
+    ("echo ${X:-make approve-spec}", APPROVAL),
+    ("echo $(( 1 + 2 )) make approve-spec", APPROVAL),
+    ('x="$(case y in y) make approve-spec;; esac)"', APPROVAL),
+    ("echo " + "$(" * 9 + "make approve-spec" + ")" * 9, APPROVAL),
+    ("uv run pytest -k 'make approve-spec'", APPROVAL),
+    ("sed 's/x/make approve-spec/e' notes.md", APPROVAL),
+    ("python3 - <<'EOF'\nprint('make approve-spec')\nEOF", APPROVAL),
+    ("echo make approve-spec", APPROVAL),
+    ("grep -rn approve-spec docs", APPROVAL),
+    ("test -f specs/IDP-14/APPROVED && echo approved", MARKER),
+    ("echo 'make approve-spec KEY=IDP-1' > x.sh; bash x.sh", APPROVAL),
+    ("{ echo 'make approve-spec'; } | sh", APPROVAL),
+    ("cat <<'EOF' | sh\nmake approve-spec KEY=IDP-1\nEOF", APPROVAL),
+    ("$(cat <<'EOF'\nmake approve-spec KEY=IDP-1\nEOF\n)", APPROVAL),
+    ("git commit -m x -- 'specs/IDP-1/APPROVED'", MARKER),
+    ("tee 'specs/IDP-1/APPROVED' <<'EOF'\nx\nEOF", MARKER),
+    ("rg --pre 'make approve-spec' x", APPROVAL),
+]
+
+COMMENTED_MENTIONS = [
+    ("echo ok # make approve-spec KEY=IDP-14", APPROVAL),
+    ("# approve-spec", APPROVAL),
+    ("cat README.md # specs/IDP-14/APPROVED", MARKER),
+    ("cat > pr.md <<'EOF'\nok\nEOF\n# make approve-spec", APPROVAL),
+    ("echo 'x' # it's approve-spec time", APPROVAL),
+    ("git commit -m 'x' # APPROVED", MARKER),
 ]
 
 LARGE_BODY = "Run `make approve-spec KEY=IDP-14`; it writes specs/IDP-14/APPROVED.\n" * 2900
@@ -252,11 +293,26 @@ def test_mentioning_approval_as_text_is_allowed(tmp_path: Path, command: str) ->
 
 @pytest.mark.ac("IDP-14:AC-1")
 @pytest.mark.ac("IDP-14:AC-2")
-@pytest.mark.parametrize("command", UNSURE_MENTIONS)
-def test_approval_check_fails_closed_when_unsure(tmp_path: Path, command: str) -> None:
+@pytest.mark.parametrize(("command", "reason"), UNSURE_MENTIONS)
+def test_approval_check_fails_closed_when_unsure(tmp_path: Path, command: str, reason: str) -> None:
     result = run_hook("guard_bash.py", bash(command), tmp_path)
     assert result.returncode == 2, f"{command}: {result.stderr}"
-    assert "BLOCKED by idp-agentic" in result.stderr
+    assert reason in result.stderr, result.stderr
+
+
+@pytest.mark.ac("IDP-14:AC-1")
+@pytest.mark.ac("IDP-14:AC-2")
+@pytest.mark.parametrize(("command", "reason"), COMMENTED_MENTIONS)
+def test_mentions_in_comments_block(tmp_path: Path, command: str, reason: str) -> None:
+    result = run_hook("guard_bash.py", bash(command), tmp_path)
+    assert result.returncode == 2, f"{command}: {result.stderr}"
+    assert reason in result.stderr, result.stderr
+
+
+@pytest.mark.ac("IDP-14:AC-3")
+def test_hook_parses_as_python_39() -> None:
+    tree = ast.parse((SCRIPTS / "guard_bash.py").read_text(), feature_version=(3, 9))
+    assert not [node for node in ast.walk(tree) if isinstance(node, ast.Match)]
 
 
 @pytest.fixture(scope="module")
@@ -275,19 +331,23 @@ def guard() -> ModuleType:
     ("command", "blocked"),
     [
         (LARGE_HEREDOC, False),
-        ("echo " + "make approve-spec " * 11_000, False),
+        ("echo '" + "make approve-spec " * 11_000 + "'", False),
+        ("echo " + "'approve-spec' " * 20_000, False),
+        ("echo " + "make approve-spec " * 11_000, True),
         ("ls " + "make " * 40_000, False),
-        ("echo '" + "x" * 200_000, False),
+        ("echo 'approve-spec " + "x" * 200_000, True),
         ("echo " + "$(" * 2_000 + "make approve-spec" + ")" * 2_000, True),
-        ("cat" + " <<E" * 2_000 + "\n" + "body\nE\n" * 2_000, False),
+        ("cat" + " <<E" * 2_000 + "\n" + "approve-spec\nE\n" * 2_000, False),
     ],
     ids=[
         "200kb-quoted-heredoc",
-        "200kb-single-line",
+        "200kb-quoted-mentions",
+        "20k-quoted-words",
+        "200kb-unquoted-mentions",
         "40k-words",
         "200kb-unterminated-quote",
         "2k-nested-subst",
-        "2k-heredocs-one-line",
+        "2k-heredocs-with-mentions",
     ],
 )
 def test_large_command_is_checked_within_a_second(guard: ModuleType, command: str, blocked: bool) -> None:
