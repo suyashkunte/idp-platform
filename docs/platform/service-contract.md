@@ -92,40 +92,107 @@ spec:
   each of `smoke`, `api`, `e2e`, `perf` whose `spec.tests.<kind>` is `true`. Recommended targets (`verify-fast`,
   `format`) are not checked. Every missing target is reported, not only the first. Make checks also run when the schema
   check fails, but are skipped if the YAML cannot be parsed into a mapping.
-- Targets are found by **static parsing**; `make` is never executed. A target counts when a line at column 0 names it
-  before `:` or `::` (not `:=`, `::=`, `:::=`); comments after an unescaped `#` are ignored (`\#` is a literal hash).
-  Not counted: names listed only in `.PHONY:` or other special targets starting with `.`, pattern rules (`%`), names
-  containing `$(...)`, variable assignments, target-specific variable lines (`name: VAR = x`, also with `:=`, `?=`,
-  `+=`, `!=`, `export`/`override`), lines inside `define ... endef` (skipped, nesting supported), recipe (tab-indented)
-  and indented lines. `include`, `-include` and `sinclude` are followed recursively for literal paths relative to the
-  Makefile's directory; words with `$` or glob characters and files not on disk are skipped. Limitations: conditionals
-  (`ifeq`/`ifdef`/...) are not evaluated (targets in either branch count); line continuations in rule lines and
-  variable expansion are not interpreted, so define required targets as plain rules. A comment ending in `\` is
-  continued onto the next line by make, but not by the scanner: a target defined on that next line counts here although
-  make never sees it, so `make` then fails at run time (`No rule to make target`). Rules whose target is `Makefile` or
-  an included file (rules that would remake them) are not rejected by `idp validate`; `idp conformance` pins those
-  files with `--assume-old` instead (see [Onboarding](onboarding.md#reference-example)).
-- **No backslash on include lines.** An `include`, `-include` or `sinclude` line (after comment stripping) that
-  contains a backslash anywhere, whether a line continuation (`-include common.mk \` followed by `  gen.mk`) or an
-  escape (`-include gen\#.mk`, `x\ y.mk`), gives one violation per line:
+- Targets are found by **static parsing**; `make` is never executed. The Makefile and every followed include are
+  scanned **once**, and that one scan gives both the targets checked here and the include words `idp conformance`
+  pins.
+- **Makefiles are read in make's logical lines**, as GNU make's reader does, before anything else is looked at:
+  - the text is split on LF only, and one CR before each LF is dropped (LF, CRLF and mixed files are accepted);
+  - a physical line ending in an odd number of backslashes continues onto the next one (an even number is literal
+    backslashes). This applies to every kind of line: assignments, rules, recipes, comments, `define` bodies and
+    `endef` lines;
+  - each joined line is then collapsed the way make collapses it before it recognises directives: the
+    backslash-newline and the blanks after it become one space, and the blanks before a single `\` are dropped (with
+    3 or more backslashes, (n-1)/2 literal backslashes stay). So `override \` + `define Y` reads `override define Y`,
+    a line holding only `\` followed by `  endef` reads ` endef`, and `lint \` + `  verify:` reads `lint verify:`;
+  - only then are comments removed (from the first unescaped `#`; `\#` is a literal hash). So a comment ending in `\`
+    swallows the next line, in make and here: `# note \` + `verify:` (or `lint: # note \` + `verify:`) defines no
+    `verify`, and `idp validate` reports `missing required target 'verify'`.
+- A target counts when a logical line at column 0 names it before `:` or `::` (not `:=`, `::=`, `:::=`). Not counted:
+  names listed only in `.PHONY:` or other special targets starting with `.`, pattern rules (`%`), names containing
+  `$(...)`, variable assignments, target-specific variable lines (`name: VAR = x`, also with `:=`, `?=`, `+=`, `!=`,
+  `export`/`override`), lines inside `define ... endef` (below), recipe (tab-indented) lines, and lines that start
+  with a blank, also after a collapsed continuation (`\` + `verify:` reads ` verify:`; make defines `verify` there, the
+  scanner fails closed and does not). Define required targets as plain column-0 rules. `include`, `-include` and
+  `sinclude` are followed recursively for literal paths relative to the Makefile's directory; words with `$` or glob
+  characters and files not on disk are skipped (`idp conformance` pins or rejects `$` words, see
+  [Onboarding](onboarding.md#reference-example)). Conditionals (`ifeq`/`ifdef`/...) are not evaluated (targets in
+  either branch count) and variables are not expanded. Rules whose target is `Makefile` or an included file (rules
+  that would remake them) are not rejected by `idp validate`; `idp conformance` pins those files with `--assume-old`
+  instead.
+- **`define` blocks.** At top level, `define NAME` and `override define NAME` (also `define NAME = value`) open a
+  block; a line starting with a tab does not (make tests the tab before collapsing, and after a rule it is a recipe
+  line). `define := 1` and `export define ?= 3` assign a variable named `define`. Body lines are classified like
+  make's `do_define`, on the collapsed line and without removing comments: after leading blanks, `endef` alone or
+  followed by a blank (`endef # done`) closes the block; everything else is body text (`define#`,
+  `override define B`, `export define B`, a tab-indented `define B`). Body lines are not scanned (no targets, no
+  includes). Two kinds of line fail closed, one violation per line:
+  - `define body in '<file>' has a line make reads differently in skipped conditional branches (nested define, endef followed by '#', or tab-indented endef); remove it`
+    for a nested `define` (a body line that is `define` or starts with `define` and a blank), a body line starting
+    with `endef#`, or a tab-indented `endef`. Reason: in a taken conditional branch make counts the nested `define` and
+    ignores the other two, but in a skipped branch it stops at the first `endef` word without counting; the scanner
+    does not evaluate conditionals. Scanning of the file continues. Remedy: define the inner variable in its own
+    top-level block, write `endef # comment` (blank before `#`), and do not tab-indent `endef`.
+  - `'<file>' has a define with export, unexport or private, which GNU make 3.81 and 4.x read differently; use define or override define`
+    for a top-level define line with any modifier list other than one `override` (`export define X`,
+    `private define X = 1`, `override export define X`). Reason: make 3.81 has no `private` and no `export define`
+    and reads such a line as an assignment or `export` directive, while 4.x opens a block. The line opens no block and
+    scanning continues. Remedy: `define X` ... `endef`, then `export X` on its own line.
+- **Characters make reads differently.** Each scanned file is checked after UTF-8 decoding and before parsing, in
+  this order, and the first offending character is named:
+  - `'<file>' contains a line separator make does not use (<what>); use LF or CRLF line endings`, for a CR not
+    followed by LF (`<what>` is `CR not followed by LF`) or U+000B, U+000C, U+001C-U+001E, U+0085, U+2028, U+2029
+    (`<what>` is e.g. `U+0085`). Python would split lines there; make does not.
+  - `'<file>' contains a control or space character make reads differently (<what>); use only spaces, tabs and LF or CRLF line endings`,
+    for the C0 controls U+0000-U+0008 and U+000E-U+001B (including NUL) and every other character Python treats as
+    whitespace but make does not (U+001F, U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000), e.g.
+    `'Makefile' contains a control or space character make reads differently (U+00A0); use only spaces, tabs and LF or CRLF line endings`.
+    Python would split words there that make reads as one. DEL, the other C1 controls, U+200B and U+FEFF are accepted.
+
+  Such a file is not parsed (its targets and includes are not collected); like the read problems below, the violation
+  counts toward the problem cap and other queued files are still scanned. Remedy: convert line endings to LF or CRLF,
+  replace non-breaking or other Unicode spaces with plain spaces, and remove control characters (a recipe that needs
+  one can produce it at run time, e.g. with `printf`).
+- **No backslash on include lines.** An include line (a logical line whose first word, after collapsing and comment
+  removal, is `include`, `-include` or `sinclude`) whose uncollapsed text contains a backslash anywhere, whether a
+  line continuation (`-include common.mk \` followed by `  gen.mk`, or a line holding only `\` followed by
+  `-include gen.mk`, which make reads as an include) or an escape (`-include gen\#.mk`, `x\ y.mk`), gives one
+  violation per line:
   `include line in '<file>' uses a backslash (continuation or escape); write each include word literally on one line`,
   where `<file>` is `Makefile` or the include word of the file that holds the line. Reason: make unescapes and joins
   such lines, so the words it includes could differ from the ones checked and pinned. The words of such a line are not
-  followed, and, like the read problems below, these violations replace the missing-target list. A backslash only inside a comment, or on a non-include line, is not flagged. Remedy: write each include
-  word literally, on one line, or split a long list over several include lines.
+  followed, and, like the read problems below, these violations replace the missing-target list. A backslash only
+  inside a comment, or on a non-include line, is not flagged: `X = \` + `-include gen.mk` is one assignment, make
+  includes nothing, and the scanner records nothing. Remedy: write each include word literally, on one line, or split
+  a long list over several include lines.
 - Reads are **confined to the service directory** (the directory of the validated `idp.yaml`): absolute include paths,
-  includes escaping it via `..`, and files whose real path (after symlinks) is outside it are not read and are reported,
-  e.g. `include '../shared.mk' is outside the service directory` or `Makefile resolves outside the service directory`.
-  Each file is read up to 1 MiB (`'<name>' exceeds 1 MiB`) and at most 64 files are read
-  (`too many included files (limit 64)`). Unreadable, non-UTF-8 or symlink-loop files, and include words containing a
-  NUL byte, give `cannot read '<name>'`. Repeated include words are checked once; more than 1024 distinct include
-  spellings (`a.mk` and `./a.mk` count separately, even for one file) or normalised words give
-  `too many include words (limit 1024)`, and after 20 problems (backslash include lines included) scanning stops with
-  `too many include problems (limit 20)`. Words echoed in messages are truncated to 200 characters (`…`).
-  Includes outside the service directory, such as a shared `../common.mk` in a monorepo, are rejected even with
-  `-include`; copy shared targets into the service directory instead.
+  includes escaping it via `..`, include words make expands to a home directory (a leading `~` or `~user`, also after
+  leading `./` runs: `~/x.mk`, `./~/x.mk`, `.//~/x.mk`) and files whose real path (after symlinks) is outside it are
+  not read and are reported, e.g. `include '../shared.mk' is outside the service directory`,
+  `include './~/evil.mk' is outside the service directory` or `Makefile resolves outside the service directory`
+  (a `~` elsewhere, as in `a~b.mk`, is literal). Each file is read up to 1 MiB (`'<name>' exceeds 1 MiB`) and at most
+  64 files are read (`too many included files (limit 64)`). Unreadable, non-UTF-8 or symlink-loop files give
+  `cannot read '<name>'`. Repeated include words are checked once; more than 1024 distinct include spellings (literal
+  and `$` words together; `a.mk` and `./a.mk` count separately, even for one file) give
+  `too many include words (limit 1024)`, and after 20 problems (backslash include lines, define and character
+  violations included) scanning stops with `too many include problems (limit 20)`. Words echoed in messages are
+  truncated to 200 characters (`…`). Includes outside the service directory, such as a shared `../common.mk` in a
+  monorepo, are rejected even with `-include`; copy shared targets into the service directory instead.
   When any of these occur, only these problems are reported (the target list would be incomplete), in line order,
   after any shadowing-makefile violations.
+- **Residual risk (what the scanner does not model).** The scanner is a static model of GNU make's reader, not make
+  itself (running `make -pn` in a sandbox is an ADR candidate after IDP-23). Not modelled:
+  - include words that are globs without `$` (`include *.mk`) are skipped, neither scanned nor pinned;
+  - includes produced by `$(eval ...)`, or by include lines inside `define` bodies that are later evaluated;
+  - make's default include search path: a literal include not found beside the Makefile is looked up in directories
+    such as `/usr/local/include` and `/usr/include`, which are never scanned (pinning stops a rule from creating it,
+    but a file already there is read);
+  - archive-member syntax in include words (`lib(x.mk)`) (follow-up);
+  - make 4.x reader features `.RECIPEPREFIX`, `load`/`-load` and `guile`;
+  - a tab-indented `define` at top level before any rule: make opens a block there, the scanner reads the body as
+    ordinary lines, so it may credit targets make never defines (this fails open only for the target checks; make
+    then fails at run time with `No rule to make target`);
+  - make 4.x on macOS: which bytes make treats as blanks depends on the C library and locale; the character checks
+    above model glibc, which CI uses.
 - Text output: `<file>: valid (idp-service.v1.json)`, or one line per violation, e.g.
   `idp.yaml: Makefile: missing required target 'lint'`,
   `idp.yaml: GNUmakefile: GNU make reads this file before Makefile, but only Makefile is validated; remove or rename it`,
@@ -154,7 +221,9 @@ include $(IDP_PROFILE_DIR)/defaults.mk
 - `IDP_PROFILE_DIR` is the profile directory: the `dir` printed by `idp profile show <profile> --json` (set by hand
   locally; in CI by the platform's setup step). Use the variable form: `idp validate` skips include words containing
   `$`, but rejects a literal include outside the service directory (e.g. an absolute path to the installed
-  `defaults.mk`) as `include '...' is outside the service directory`.
+  `defaults.mk`) as `include '...' is outside the service directory`. `idp conformance` pins exactly
+  `$(IDP_PROFILE_DIR)/<literal file>` and fails any other `$` include word (see
+  [Onboarding](onboarding.md#reference-example)).
 - A target you define yourself (`sca: ...` with a recipe) replaces the default, with no make warnings, whether the
   include comes before or after your rule. Overriding one default does not affect the other.
 

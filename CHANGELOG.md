@@ -57,3 +57,12 @@ versions follow [Semantic Versioning](https://semver.org/).
   of a traceback, and conformance continues with the other examples; rejects any `include`/`-include`/`sinclude` line
   containing a backslash (continuation or escape); and caps include spellings at 1024, so 1025 spellings of 1024 or
   fewer files now fail with `too many include words (limit 1024)`.
+- IDP-28: `idp validate` reads Makefiles in make's logical lines (LF only, CR before LF dropped, odd trailing
+  backslashes continue, continuations collapsed before directives, so a comment ending in `\` swallows the next line)
+  and classifies `define` bodies like make (`define` and `override define` blocks only); it rejects line separators
+  make does not use, control and Unicode space characters make reads differently (including NUL), include directives
+  reached through a continuation, ambiguous define body lines (nested `define`, `endef#`, tab-indented `endef`),
+  `export`/`unexport`/`private define`, and `~` include words (also after leading `./`). `idp conformance` scans the
+  Makefile once and pins from that validated scan, pins `$(IDP_PROFILE_DIR)/<literal rest>` as
+  `<resolved profile dir>/<rest>`, and fails any other `$` include word (including a `<rest>` with a `..` segment or
+  a leading `/`) with `dynamic include '<word>' cannot be pinned` without running make.

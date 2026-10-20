@@ -1,6 +1,7 @@
 """IDP-19: `idp conformance [DIR]` runs `idp validate` and `make verify` for every example with an `idp.yaml`."""
 
 import ast
+import dataclasses
 import importlib
 import inspect
 import os
@@ -671,35 +672,44 @@ def test_conformance_fails_when_include_words_exceed_make_argument_limit(
     assert [argv[3] for argv, _ in calls] == ["examples/plain"]
 
 
-@pytest.mark.ac("IDP-22:AC-5")
-def test_conformance_fails_when_makefile_changes_between_scans(
+@pytest.mark.ac("IDP-28:AC-5")
+def test_conformance_scans_makefile_once_and_pins_from_validated_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _write_example(tmp_path / "examples", "changed")
+    # Replaces IDP-22 `test_conformance_fails_when_makefile_changes_between_scans` (asserted a second scan; IDP-28 Q14).
+    _write_example(tmp_path / "examples", "once")
     original = contract.makefile_targets
     scans: list[Path] = []
 
-    def changing_scan(makefile: Path) -> contract.MakefileScan:
+    def counting_scan(makefile: Path) -> contract.MakefileScan:
         scans.append(makefile)
-        if len(scans) == 1:  # the validation scan sees the committed files
-            return original(makefile)
-        return contract.MakefileScan(frozenset(), (contract.Violation("Makefile", "cannot read 'common.mk'"),))
+        scan = original(makefile)
+        # A sentinel per call shows which scan the pinned words come from.
+        return dataclasses.replace(scan, include_words=(*scan.include_words, f"from-scan-{len(scans)}.mk"))
 
-    monkeypatch.setattr(contract, "makefile_targets", changing_scan)
-    _fake_make_on_path(tmp_path, monkeypatch)
+    monkeypatch.setattr(contract, "makefile_targets", counting_scan)
+    make = _fake_make_on_path(tmp_path, monkeypatch)
     calls = _recording_popen(monkeypatch)
     monkeypatch.chdir(tmp_path)
 
     code = _run(["conformance", "examples"])
 
-    assert capsys.readouterr().out == (
-        "FAIL examples/changed: idp validate: 1 violation(s)\n"
-        "    Makefile: cannot read 'common.mk'\n"
-        "conformance: 0 passed, 1 failed\n"
-    )
-    assert code == 1
-    assert len(scans) == 2
-    assert calls == []
+    assert capsys.readouterr().out == "PASS examples/once\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert scans == [Path("examples/once/Makefile")]
+    assert len(calls) == 1
+    argv, _ = calls[0]
+    assert argv[:9] == [
+        str(make),
+        "--no-print-directory",
+        "-C",
+        "examples/once",
+        "-f",
+        "Makefile",
+        "--assume-old=Makefile",
+        "--assume-old=from-scan-1.mk",
+        "verify",
+    ]
 
 
 OLD_MTIME = 1_600_000_000  # validated files
@@ -837,3 +847,578 @@ def test_conformance_rejects_backslash_include_lines_without_running_make(
     )
     assert code == 1
     assert sorted(p.name for p in directory.iterdir()) == ["Makefile", "common.mk", "idp.yaml"]
+
+
+# --- IDP-28 AC-1/AC-2: make and the scanner read the same logical lines (real make) -------------------------------
+
+CONTINUATION_ATTACK = f"X = \\\ndefine Y\n-include gen.mk\ngen.mk:\n{GENERATE_EVIL}gen.mk\ndefine Z\nendef\n"
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-1")
+def test_continuation_cannot_hide_generated_include_from_pinning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # make reads `X = \` + `define Y` as `X = define Y`: no define block, so it sees `-include gen.mk` and its rule.
+    directory = _write_example(tmp_path / "examples", "continued", verify="@touch validated-ran")
+    _append_to_makefile(directory, CONTINUATION_ATTACK)
+    os.utime(directory / "Makefile", (OLD_MTIME, OLD_MTIME))
+    for var in STRIPPED_MAKE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/continued\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert (directory / "validated-ran").exists()
+    assert not (directory / "evil-ran").exists()
+    assert not (directory / "gen.mk").exists()
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-2")
+@pytest.mark.parametrize(("separator", "what"), [("\x0b", "U+000B"), ("\x85", "U+0085")], ids=["vt", "nel"])
+def test_conformance_rejects_foreign_line_separators_without_running_make(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], separator: str, what: str
+) -> None:
+    # make reads `X = 1<sep>define Y` as one assignment line; Python's splitlines() would open a define block there.
+    directory = _write_example(tmp_path / "examples", "separated", verify="@touch validated-ran")
+    attack = CONTINUATION_ATTACK.replace("X = \\\n", f"X = 1{separator}")
+    makefile = directory / "Makefile"
+    makefile.write_bytes((makefile.read_text() + attack).encode("utf-8"))
+    os.utime(makefile, (OLD_MTIME, OLD_MTIME))
+    for var in STRIPPED_MAKE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/separated: idp validate: 1 violation(s)\n"
+        f"    Makefile: 'Makefile' contains a line separator make does not use ({what}); use LF or CRLF line endings\n"
+        "conformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert sorted(p.name for p in directory.iterdir()) == ["Makefile", "idp.yaml"]
+
+
+# --- IDP-28 AC-4: `$(IDP_PROFILE_DIR)/<rest>` includes are pinned with the resolved profile dir; other `$` fail ----
+
+
+def _temporary_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Resolve every profile to an empty `tmp_path/profile` (the platform's real profile is never a test target)."""
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+
+    def fake_resolve(name: str) -> dict[str, Any]:
+        return {"name": name, "dir": str(profile_dir)}
+
+    monkeypatch.setattr(profiles, "resolve", fake_resolve)
+    return profile_dir
+
+
+@pytest.mark.ac("IDP-28:AC-4")
+def test_profile_dir_include_is_pinned_with_resolved_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directory = _write_example(tmp_path / "examples", "profiled")
+    _append_to_makefile(
+        directory,
+        "include $(IDP_PROFILE_DIR)/defaults.mk\n"
+        "include common.mk\n"
+        # IDP-28 amendment 1: was `../shared/extra.mk`, now unpinnable (AC-14).
+        "-include $(IDP_PROFILE_DIR)/sub/extra.mk $(IDP_PROFILE_DIR)/defaults.mk\n",
+    )
+    (directory / "common.mk").write_text("COMMON := 1\n")
+    profile_dir = _temporary_profile(tmp_path, monkeypatch)
+    make = _fake_make_on_path(tmp_path, monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/profiled\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert len(calls) == 1
+    argv, _ = calls[0]
+    assert argv == [
+        str(make),
+        "--no-print-directory",
+        "-C",
+        "examples/profiled",
+        "-f",
+        "Makefile",
+        "--assume-old=Makefile",
+        "--assume-old=common.mk",
+        f"--assume-old={tmp_path}/profile/defaults.mk",
+        f"--assume-old={tmp_path}/profile/sub/extra.mk",
+        "verify",
+        f"IDP_PROFILE_DIR={profile_dir}",
+    ]
+
+
+@pytest.mark.ac("IDP-28:AC-4")
+def test_profile_dir_include_counts_toward_make_argument_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    conformance = _conformance()
+    directory = _write_example(tmp_path / "examples", "bulky")
+    _append_to_makefile(directory, "include $(IDP_PROFILE_DIR)/defaults.mk\n")
+    _temporary_profile(tmp_path, monkeypatch)
+    # `--assume-old=Makefile` (21 bytes) fits; the absolute profile pin does not.
+    monkeypatch.setattr(conformance, "MAX_ASSUME_OLD_BYTES", 40)
+    _fake_make_on_path(tmp_path, monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/bulky: include words exceed the make argument limit\nconformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert calls == []
+
+
+@pytest.mark.ac("IDP-28:AC-4")
+@pytest.mark.ac("IDP-28:AC-14")
+@pytest.mark.parametrize(
+    ("words", "shown"),
+    [
+        ("$(OTHER)/x.mk", "'$(OTHER)/x.mk'"),
+        ("${IDP_PROFILE_DIR}/x.mk", "'${IDP_PROFILE_DIR}/x.mk'"),
+        ("$(IDP_PROFILE_DIR)x.mk", "'$(IDP_PROFILE_DIR)x.mk'"),
+        ("a$$b.mk", "'a$$b.mk'"),
+        ("$(IDP_PROFILE_DIR)/$(X).mk", "'$(IDP_PROFILE_DIR)/$(X).mk'"),
+        ("$(IDP_PROFILE_DIR)/*.mk", "'$(IDP_PROFILE_DIR)/*.mk'"),
+        ("$(IDP_PROFILE_DIR)/", "'$(IDP_PROFILE_DIR)/'"),
+        ("$(IDP_PROFILE_DIR)/ok.mk $(A)/first.mk $(B)/second.mk", "'$(A)/first.mk'"),
+        ("$(X)/it's.mk", '"$(X)/it\'s.mk"'),
+        ("$(OTHER)/" + "a" * 300 + ".mk", "'$(OTHER)/" + "a" * 190 + "…"),
+        # IDP-28 AC-14: a `..` segment or a leading `/` in `<rest>` would read a file outside the profile directory.
+        ("$(IDP_PROFILE_DIR)/../x.mk", "'$(IDP_PROFILE_DIR)/../x.mk'"),
+        ("$(IDP_PROFILE_DIR)/a/../../x.mk", "'$(IDP_PROFILE_DIR)/a/../../x.mk'"),
+        ("$(IDP_PROFILE_DIR)/..", "'$(IDP_PROFILE_DIR)/..'"),
+        ("$(IDP_PROFILE_DIR)//etc/x.mk", "'$(IDP_PROFILE_DIR)//etc/x.mk'"),
+    ],
+    ids=[
+        "other-variable",
+        "braces",
+        "no-slash",
+        "doubled-dollar",
+        "variable-in-rest",
+        "glob-in-rest",
+        "empty-rest",
+        "first-unpinnable-named",
+        "quote-in-word",
+        "long-word-truncated",
+        "dotdot-segment",
+        "nested-dotdot",
+        "bare-dotdot",
+        "absolute-rest",
+    ],
+)
+def test_unpinnable_dynamic_include_fails_without_running_make(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], words: str, shown: str
+) -> None:
+    alpha = _write_example(tmp_path / "examples", "alpha", verify="@touch make-ran")
+    _append_to_makefile(alpha, f"-include {words}\n")
+    _write_example(tmp_path / "examples", "bravo")
+    _temporary_profile(tmp_path, monkeypatch)
+    _fake_make_on_path(tmp_path, monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        f"FAIL examples/alpha: dynamic include {shown} cannot be pinned\n"
+        "PASS examples/bravo\n"
+        "conformance: 1 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert [argv[3] for argv, _ in calls] == ["examples/bravo"]
+
+
+@pytest.mark.ac("IDP-28:AC-4")
+def test_unpinnable_dynamic_include_is_reported_before_argument_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    conformance = _conformance()
+    directory = _write_example(tmp_path / "examples", "both")
+    _append_to_makefile(directory, "include common.mk\n-include $(OTHER)/x.mk\n")
+    (directory / "common.mk").write_text("COMMON := 1\n")
+    monkeypatch.setattr(conformance, "MAX_ASSUME_OLD_BYTES", 1)  # even `--assume-old=Makefile` is over the budget
+    _fake_make_on_path(tmp_path, monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/both: dynamic include '$(OTHER)/x.mk' cannot be pinned\nconformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert calls == []
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-4")
+def test_make_cannot_remake_profile_dir_include(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    profile_dir = _temporary_profile(tmp_path, monkeypatch)
+    benign = b"PROFILE_DEFAULTS := 1\n"
+    (profile_dir / "defaults.mk").write_bytes(benign)
+    (profile_dir / "evil.src").write_text(EVIL_INCLUDE)
+    directory = _write_example(tmp_path / "examples", "profiled", verify="@touch validated-ran")
+    _append_to_makefile(
+        directory,
+        "include $(IDP_PROFILE_DIR)/defaults.mk\n"
+        "$(IDP_PROFILE_DIR)/defaults.mk: $(IDP_PROFILE_DIR)/evil.src\n"
+        "\tcp $< $@\n",
+    )
+    for path in (directory / "Makefile", profile_dir / "defaults.mk"):
+        os.utime(path, (OLD_MTIME, OLD_MTIME))
+    os.utime(profile_dir / "evil.src", (NEW_MTIME, NEW_MTIME))
+    for var in STRIPPED_MAKE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/profiled\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert (directory / "validated-ran").exists()
+    assert not (directory / "evil-ran").exists()
+    assert (profile_dir / "defaults.mk").read_bytes() == benign
+
+
+@pytest.mark.ac("IDP-28:AC-14")
+def test_profile_dir_include_with_dot_segments_is_still_pinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Only a `..` segment or a leading `/` is unpinnable: `.` segments and `..` inside a name stay pinnable.
+    directory = _write_example(tmp_path / "examples", "dotted")
+    _append_to_makefile(directory, "-include $(IDP_PROFILE_DIR)/./x.mk $(IDP_PROFILE_DIR)/..x/a..b.mk\n")
+    profile_dir = _temporary_profile(tmp_path, monkeypatch)
+    make = _fake_make_on_path(tmp_path, monkeypatch)
+    calls = _recording_popen(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/dotted\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert [argv for argv, _ in calls] == [
+        [
+            str(make),
+            "--no-print-directory",
+            "-C",
+            "examples/dotted",
+            "-f",
+            "Makefile",
+            "--assume-old=Makefile",
+            f"--assume-old={tmp_path}/profile/./x.mk",
+            f"--assume-old={tmp_path}/profile/..x/a..b.mk",
+            "verify",
+            f"IDP_PROFILE_DIR={profile_dir}",
+        ]
+    ]
+
+
+# --- IDP-28 amendment 1 (AC-6..AC-14): real make reads exactly what the scanner validated --------------------------
+
+GEN_ATTACK = f"-include gen.mk\ngen.mk:\n{GENERATE_EVIL}gen.mk\n"  # make would generate and read gen.mk
+
+
+def _ready_for_real_make(directory: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old Makefile mtime (explicit, no sleeps), no inherited make state, cwd at `tmp_path`."""
+    os.utime(directory / "Makefile", (OLD_MTIME, OLD_MTIME))
+    for var in STRIPPED_MAKE_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+
+def _files(directory: Path) -> list[str]:
+    """Sorted names in `directory`: shows whether make ran (`validated-ran`), was attacked (`evil-ran`) or generated
+    an include (`gen.mk`)."""
+    return sorted(p.name for p in directory.iterdir())
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-6")
+def test_continued_endef_cannot_hide_generated_include(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # make collapses `\` + CRLF + `  endef` to ` endef`, which closes the block, then reads `-include gen.mk`.
+    directory = _write_example(tmp_path / "examples", "continued-endef", verify="@touch validated-ran")
+    makefile = directory / "Makefile"
+    text = makefile.read_text() + "define Y\nbody\n\\\n  endef\n" + GEN_ATTACK
+    makefile.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/continued-endef\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    # The validated recipe ran; gen.mk was pinned, so make neither generated it nor ran the evil content.
+    assert _files(directory) == ["Makefile", "idp.yaml", "validated-ran"]
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-7")
+def test_conformance_rejects_continued_include_directive_without_running_make(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # make collapses `\` + `-include gen.mk` to ` -include gen.mk`: an include line the scanner must not miss.
+    directory = _write_example(tmp_path / "examples", "continued-include", verify="@touch validated-ran")
+    _append_to_makefile(directory, "\\\n" + GEN_ATTACK)
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/continued-include: idp validate: 1 violation(s)\n"
+        "    Makefile: include line in 'Makefile' uses a backslash (continuation or escape);"
+        " write each include word literally on one line\n"
+        "conformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert _files(directory) == ["Makefile", "idp.yaml"]  # make never ran
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-9")
+@pytest.mark.parametrize("body", ["define#", "override define B"], ids=["define-hash", "override-define"])
+def test_non_nesting_define_body_line_cannot_hide_generated_include(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], body: str
+) -> None:
+    # make's do_define does not nest on these lines, so the first `endef` closes `A` and make reads the include.
+    directory = _write_example(tmp_path / "examples", "body-line", verify="@touch validated-ran")
+    _append_to_makefile(directory, f"define A\n{body}\nendef\n" + GEN_ATTACK)
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/body-line\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    # The validated recipe ran; gen.mk was pinned, so make neither generated it nor ran the evil content.
+    assert _files(directory) == ["Makefile", "idp.yaml", "validated-ran"]
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-10")
+def test_define_in_skipped_conditional_cannot_hide_generated_include(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # In a branch that is not taken, make does not count the nested define: `endef` ends the skip, so it reads the
+    # include; counting nesting (as in a taken branch) would hide it.
+    directory = _write_example(tmp_path / "examples", "skipped-branch", verify="@touch validated-ran")
+    _append_to_makefile(directory, "ifeq (a,b)\ndefine A\ndefine B\nendef\nendif\n" + GEN_ATTACK)
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/skipped-branch: idp validate: 1 violation(s)\n"
+        "    Makefile: define body in 'Makefile' has a line make reads differently in skipped conditional branches"
+        " (nested define, endef followed by '#', or tab-indented endef); remove it\n"
+        "conformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert _files(directory) == ["Makefile", "idp.yaml"]  # make never ran
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-11")
+@pytest.mark.parametrize(
+    ("attack", "what"),
+    [
+        (f"-include a.mk\x1fb.mk\na.mk\x1fb.mk:\n{GENERATE_EVIL}'$@'\n", "U+001F"),
+        (f"-include a.mk\xa0b.mk\na.mk\xa0b.mk:\n{GENERATE_EVIL}'$@'\n", "U+00A0"),
+        ("define\x1fX = 1\n" + GEN_ATTACK, "U+001F"),
+    ],
+    ids=["unit-separator-in-word", "no-break-space-in-word", "unit-separator-after-define"],
+)
+def test_conformance_rejects_characters_make_reads_differently_without_running_make(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], attack: str, what: str
+) -> None:
+    # Python splits on these characters, make does not: the scanner would pin `a.mk` and `b.mk` while make remakes
+    # and reads the single file `a.mk<char>b.mk` (or reads `define<char>X = 1` as no define at all).
+    directory = _write_example(tmp_path / "examples", "foreign-char", verify="@touch validated-ran")
+    makefile = directory / "Makefile"
+    makefile.write_text(makefile.read_text() + attack, encoding="utf-8")
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/foreign-char: idp validate: 1 violation(s)\n"
+        f"    Makefile: 'Makefile' contains a control or space character make reads differently ({what});"
+        " use only spaces, tabs and LF or CRLF line endings\n"
+        "conformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert _files(directory) == ["Makefile", "idp.yaml"]  # make never ran
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-12")
+@pytest.mark.parametrize("line", ["private define X = 1", "export define X = 1"], ids=["private", "export"])
+def test_modifier_define_cannot_hide_generated_include(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], line: str
+) -> None:
+    # GNU make 3.81 reads these lines as assignments (no define block) and then reads the include; 4.x opens a block.
+    directory = _write_example(tmp_path / "examples", "modifier-define", verify="@touch validated-ran")
+    _append_to_makefile(directory, f"{line}\n" + GEN_ATTACK)
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/modifier-define: idp validate: 1 violation(s)\n"
+        "    Makefile: 'Makefile' has a define with export, unexport or private, which GNU make 3.81 and 4.x read"
+        " differently; use define or override define\n"
+        "conformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert _files(directory) == ["Makefile", "idp.yaml"]  # make never ran
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-13")
+@pytest.mark.parametrize("word", ["~/evil.mk", "./~/evil.mk"], ids=["tilde", "dot-slash-tilde"])
+def test_tilde_include_cannot_read_home_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], word: str
+) -> None:
+    # make expands a leading `~` (also after leading `./` runs) to $HOME: a file the scanner never reads.
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "evil.mk").write_text(EVIL_INCLUDE)
+    monkeypatch.setenv("HOME", str(home))
+    directory = _write_example(tmp_path / "examples", "tilde", verify="@touch validated-ran")
+    _append_to_makefile(directory, f"-include {word}\n")
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/tilde: idp validate: 1 violation(s)\n"
+        f"    Makefile: include '{word}' is outside the service directory\n"
+        "conformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert _files(directory) == ["Makefile", "idp.yaml"]  # make never ran (and never read $HOME/evil.mk)
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-14")
+def test_profile_dir_include_cannot_read_outside_profile_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Pinning stops make from remaking the file, but make still reads it: outside the profile dir it is unscanned.
+    _temporary_profile(tmp_path, monkeypatch)
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "evil.mk").write_text(EVIL_INCLUDE)
+    directory = _write_example(tmp_path / "examples", "escaping", verify="@touch validated-ran")
+    _append_to_makefile(directory, "-include $(IDP_PROFILE_DIR)/../outside/evil.mk\n")
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/escaping: dynamic include '$(IDP_PROFILE_DIR)/../outside/evil.mk' cannot be pinned\n"
+        "conformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert sorted(p.name for p in directory.iterdir()) == ["Makefile", "idp.yaml"]
+
+
+# --- IDP-28 review loop 2: real make reads what the scanner validated ---------------------------------------------
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-9")
+def test_tab_continued_define_after_rule_cannot_hide_generated_include(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # After a rule, make reads raw `\t\` + `define X` as a recipe line (tab tested before collapsing), then the include.
+    directory = _write_example(tmp_path / "examples", "tab-define", verify="@touch validated-ran")
+    _append_to_makefile(directory, "unused:\n\t\\\ndefine X\n" + GEN_ATTACK)
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/tab-define\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert _files(directory) == ["Makefile", "idp.yaml", "validated-ran"]
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-9")
+def test_define_with_variable_reference_name_keeps_its_body_unread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 3.81, 4.3 and 4.4.1 open a define block for `define $(NAME) = 1`: the include in its body is never read, so
+    # nothing is generated even though the scanner (which skips the body too) does not pin gen.mk.
+    directory = _write_example(tmp_path / "examples", "dollar-define", verify="@touch validated-ran")
+    _append_to_makefile(directory, "NAME := n\ndefine $(NAME) = 1\n" + GEN_ATTACK + "endef\n")
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/dollar-define\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert _files(directory) == ["Makefile", "idp.yaml", "validated-ran"]
+
+
+@needs_make
+@pytest.mark.ac("IDP-28:AC-13")
+@pytest.mark.parametrize(
+    ("words", "outside"),
+    [("sub/../~/x.mk ~/x.mk", "~/x.mk"), ("~/x.m?", "~/x.m?")],
+    ids=["normalising-alias", "glob"],
+)
+def test_tilde_include_hidden_by_alias_or_glob_cannot_read_home_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], words: str, outside: str
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "x.mk").write_text(EVIL_INCLUDE)
+    monkeypatch.setenv("HOME", str(home))
+    directory = _write_example(tmp_path / "examples", "tilde", verify="@touch validated-ran")
+    _append_to_makefile(directory, f"-include {words}\n")
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == (
+        "FAIL examples/tilde: idp validate: 1 violation(s)\n"
+        f"    Makefile: include '{outside}' is outside the service directory\n"
+        "conformance: 0 passed, 1 failed\n"
+    )
+    assert code == 1
+    assert _files(directory) == ["Makefile", "idp.yaml"]  # make never ran (and never read $HOME/x.mk)
+
+
+@needs_make
+@pytest.mark.ac("IDP-22:AC-5")
+def test_include_through_symlink_alias_is_scanned_and_pinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # make reads `link/../b.mk` as `sub/b.mk` (link -> sub/deep); its `-include gen.mk` must be scanned and pinned.
+    directory = _write_example(tmp_path / "examples", "alias", verify="@touch validated-ran")
+    (directory / "sub" / "deep").mkdir(parents=True)
+    (directory / "link").symlink_to(Path("sub") / "deep")
+    (directory / "b.mk").write_text("B := 1\n")
+    (directory / "sub" / "b.mk").write_text(GEN_ATTACK)
+    _append_to_makefile(directory, "-include b.mk\n-include link/../b.mk\n")
+    _ready_for_real_make(directory, tmp_path, monkeypatch)
+
+    code = _run(["conformance", "examples"])
+
+    assert capsys.readouterr().out == "PASS examples/alias\nconformance: 1 passed, 0 failed\n"
+    assert code == 0
+    assert _files(directory) == ["Makefile", "b.mk", "idp.yaml", "link", "sub", "validated-ran"]

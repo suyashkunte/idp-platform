@@ -157,6 +157,7 @@ def test_minimal_service_verify_needs_no_network() -> None:
 
 @needs_make
 @pytest.mark.ac("IDP-19:AC-2")
+@pytest.mark.ac("IDP-28:AC-4")  # minimal-service still PASSes with its profile include pinned
 def test_platform_examples_pass_conformance_within_60_seconds(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

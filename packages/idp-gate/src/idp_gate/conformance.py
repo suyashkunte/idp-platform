@@ -3,7 +3,14 @@
 IDP-22: an example that is a symlink or resolves outside the examples directory fails before anything runs, and
 `make verify` reads only the validated Makefile (`-f Makefile`). The Makefile and every literal include word the scan
 saw are pinned with `--assume-old=<word>`, so make neither remakes them nor restarts with unvalidated content.
-Residual risk: dynamic includes (`$(...)` words, e.g. `$(IDP_PROFILE_DIR)/defaults.mk`) are not pinned."""
+
+IDP-28: the Makefile is scanned once, and the validated scan supplies the pins. That scan reads make's logical lines
+(continuations collapsed, define bodies closed like make) and fails closed on lines or characters make reads
+differently and on `~` include words (AC-6..AC-13). `$(IDP_PROFILE_DIR)/<rest>` words are pinned as
+`<resolved profile dir>/<rest>`; any other `$` word, or a `<rest>` that is not literal, is empty or leaves the profile
+directory (`..` segment, leading `/`; AC-14), fails the example without running make.
+Residual risk: glob words, `$(eval ...)`-generated includes, `override IDP_PROFILE_DIR` and make reader features the
+scanner does not model (docs/platform/service-contract.md)."""
 
 from __future__ import annotations
 
@@ -23,6 +30,9 @@ OUTPUT_TAIL_LINES = 40
 EXAMPLE_FILE = "idp.yaml"
 # Inherited make state must not change the example's run (outer `make -n/-k/-j`, MAKEFILES).
 _MAKE_ENV_STRIPPED = frozenset({"MAKEFLAGS", "GNUMAKEFLAGS", "MAKELEVEL", "MFLAGS", "MAKEFILES"})
+# `$(IDP_PROFILE_DIR)/<rest>` include words are pinned as `<resolved profile dir>/<rest>` (make's command-line value).
+PROFILE_DIR_PREFIX = "$(IDP_PROFILE_DIR)/"
+_UNPINNABLE_CHARS = "$*?["  # a `<rest>` make would expand or glob cannot be pinned literally
 
 
 @dataclass(frozen=True)
@@ -67,6 +77,21 @@ def _assume_old(words: tuple[str, ...]) -> list[str] | None:
             names.append(stripped)
     args = [f"--assume-old={n}" for n in dict.fromkeys(names)]
     return None if sum(len(a.encode("utf-8")) for a in args) > MAX_ASSUME_OLD_BYTES else args
+
+
+def _profile_names(words: tuple[str, ...], profile_dir: str) -> tuple[list[str], str | None]:
+    """Resolved paths for `$(IDP_PROFILE_DIR)/<rest>` words, in order, or `([], word)` for the first word that
+    cannot be pinned (another variable, a `$`/glob character in `<rest>`, an empty `<rest>`, or a `<rest>` that
+    leaves the profile directory: a `..` segment or a leading `/`)."""
+    names: list[str] = []
+    for word in words:
+        rest = word[len(PROFILE_DIR_PREFIX) :]
+        if not word.startswith(PROFILE_DIR_PREFIX) or not rest or any(c in rest for c in _UNPINNABLE_CHARS):
+            return [], word
+        if rest.startswith("/") or ".." in rest.split("/"):
+            return [], word
+        names.append(f"{profile_dir}/{rest}")
+    return names, None
 
 
 def _invalid(directory: Path, violations: Sequence[contract.Violation]) -> Result:
@@ -131,17 +156,18 @@ def check_example(directory: Path, make: str, root: Path) -> Result:
     if _outside(directory, root):
         return Result(directory, ok=False, reason="outside examples directory")
     path = directory / EXAMPLE_FILE
-    doc, violations = contract.load_service(path)
+    doc, violations, scan = contract.load_service(path)
+    # The scan is empty only when the Makefile was not scanned, which always comes with violations: never used below.
     if violations:
         return _invalid(directory, violations)
     try:
         profile_dir = str(profiles.resolve(doc["spec"]["build"]["profile"])["dir"])
     except profiles.ProfileError as exc:
         return Result(directory, ok=False, reason="profile: " + "; ".join(exc.lines))
-    scan = contract.makefile_targets(directory / contract.MAKE_PATH)  # include words to pin; files may have changed
-    if scan.violations:
-        return _invalid(directory, scan.violations)
-    assume_old = _assume_old(scan.include_words)
+    names, unpinnable = _profile_names(scan.dynamic_include_words, profile_dir)
+    if unpinnable is not None:
+        return Result(directory, ok=False, reason=f"dynamic include {contract.shown(unpinnable)} cannot be pinned")
+    assume_old = _assume_old((*scan.include_words, *names))
     if assume_old is None:
         return Result(directory, ok=False, reason="include words exceed the make argument limit")
     return _run_make_verify(directory, make, profile_dir, assume_old)
