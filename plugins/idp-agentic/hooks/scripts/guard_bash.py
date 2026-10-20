@@ -3,12 +3,13 @@
 
 Defence in depth behind the permission deny-list and GitHub rulesets. Stdlib only, Python 3.9+.
 
-Spec approval (IDP-14) is judged by what a command runs or writes, not by text it only mentions. A small lexer
-replaces heredoc bodies and quoted text with a DATA mark, then each simple command is checked. Any mention still
-blocks, as before IDP-14, when the lexer is unsure (unterminated quotes or heredocs, backticks, complex expansions),
-when text may reach a shell or interpreter, or when data goes to a command that does not only print or record it.
+Spec approval (IDP-14) is relax-only: every mention of `approve-spec` or of an `APPROVED` file in the raw command
+blocks, unless a small lexer shows that the mention is quoted or heredoc data given to a command that only prints or
+records it, or (for the marker) a plain argument of a read-only command. When the lexer cannot follow the shell,
+nothing is relaxed.
 """
 
+import bisect
 import json
 import re
 import sys
@@ -49,377 +50,333 @@ RULES = [
 ]
 COMPILED = [(re.compile(p, re.IGNORECASE), why) for p, why in RULES]
 
-# Spec approval (IDP-14)
+# Spec approval (IDP-14): a raw mention blocks unless it lies in a span the lexer relaxed.
 APPROVE_WHY = "spec approval is a human checkpoint (A)"
 MARKER_WHY = "the APPROVED marker is written only by `make approve-spec`, run by a human"
-# Fail-closed view, used when the lexer is unsure: any mention blocks (covers both pre-IDP-14 rules).
-MENTION = re.compile(r"approve-spec|specs/[^/\s]+/APPROVED", re.IGNORECASE)
-UNSURE = "unsure"  # verdict for a simple command where only the mention check is safe
-DATA = "\x00"  # stands for quoted text and for a skipped heredoc body
+MENTION = re.compile(r"approve-spec|(?<![\w.-])approved(?![\w.-])", re.IGNORECASE)
 MAX_DEPTH = 8  # nested $( ) levels the lexer follows
-KEEP_ESCAPED = "-_./=+,:@%~"  # escaped characters that stay part of a word (besides letters, digits, blanks)
 
-KEYWORDS = frozenset({"if", "then", "else", "elif", "do", "while", "until", "coproc"})
-RUNNERS = frozenset({"make", "gmake", "idp"})
-MAKES = frozenset({"make", "gmake"})
-WRITERS = frozenset({"cp", "dd", "install", "ln", "mv", "rm", "rsync", "tee", "touch", "truncate"})
-GIT_WRITERS = frozenset({"add", "apply", "checkout", "mv", "restore", "rm", "stage", "update-index"})
-PRINTERS = frozenset(
-    {
-        "cat",
-        "echo",
-        "printf",
-        "tee",
-        "grep",
-        "egrep",
-        "fgrep",
-        "rg",
-        "head",
-        "tail",
-        "wc",
-        "jq",
-        "test",
-        "[",
-        "[[",
-        "sort",
-        "diff",
-        "true",
-        ":",
-    }
-)
-GIT_PRINTERS = frozenset({"commit", "diff", "grep", "log", "notes", "show", "stash", "status", "tag"})
-GH_OBJECTS = frozenset({"issue", "pr", "release"})
-GH_PRINTERS = frozenset({"close", "comment", "create", "edit", "list", "reopen", "view"})
+TESTS = {"test", "[", "[["}
+READERS = {"cat", "ls", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg"} | TESTS
+PRINTERS = READERS - {"ls"} | {"echo", "printf", "jq", "true", ":"}
+INERT = PRINTERS | READERS | {"tee", "cd", "mkdir", "pwd", "false"}
+GIT_READ = {"log", "show", "status", "diff"}
+GIT_DATA = GIT_READ | {"grep"}
+GIT_MESSAGE = {"commit", "tag", "notes"}
+GH_OBJECTS = {"issue", "pr", "release"}
+GH_VERBS = {"create", "edit", "comment"}
 
-# Lexer
-_PLAIN = re.compile(r"[^\\'\"$`#<>()\n]+")
+_PLAIN = re.compile(r"[^ \t\n;&|()<>\\'\"$`]+")
 _DQ_SPECIAL = re.compile(r'[\\"$`]')
 _ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL)
 _SIMPLE_PARAM = re.compile(r"\$\{(?:#?[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])\}")
-_HEREDOC = re.compile(r"<<-?[ \t]*")
-_CASE = re.compile(r"(?:^|[\s;&|(])case\s")
-_NOT_A_WORD = re.compile(r"[\s;&|<>(){}`!]")
-
-# Analysis of the masked text (words are lower-cased)
-_SEPARATORS = re.compile(r"[\n;&|(){}`!]")
-_REDIRECT = re.compile(r">[>|&]?[ \t]*([^\s<>;&|()]+)")
-_NOISE = re.compile(r"\$(?=['\"])|['\"\\\x00]")
-_ASSIGNMENT = re.compile(r"[a-z_][a-z0-9_]*\+?=")
-_REDIRECT_OP = re.compile(r"[0-9]*[<>]+[-&|]?")
-_REDIRECT_WORD = re.compile(r"[0-9]*[<>]")
-_MARKER = re.compile(r"(?:^|[/=])approved$")
-_SED_IN_PLACE = re.compile(r"-[a-z]*i|--in-place")
-_MAKE_READS_TEXT = re.compile(r"-[a-z]*[ef]|--(?:file|makefile|eval)")
-_GIT_RUNS_TEXT = re.compile(r"-c|--config-env.*|-x|--exec.*|bisect|foreach|filter-branch")
-_INTERPRETER = re.compile(
-    r"(?:ba|z|da|k|c|tc|fi|mk|)sh|eval|source|\.|xargs|parallel|su|ssh|script|at|batch|crontab|alias|"
-    r"python[0-9.]*|pypy[0-9.]*|perl|ruby|node|deno|bun|php|lua|tclsh|expect|osascript|pwsh|busybox|[gmn]?awk"
-)
+_OUTPUT = re.compile(r"-o.*|--output.*|of=.*|-w|--pre.*|-O.*|--open-files-in-pager.*")
 
 
 class _Unsure(Exception):
-    """Raised when the lexer cannot tell code from data."""
+    """The lexer cannot follow the shell here, so nothing is relaxed."""
 
 
-class _State:
-    """Lexer position plus the heredocs whose bodies start after the next newline."""
+class _Word:
+    """One shell word: its literal text (for names and options) and the raw spans that may be relaxed."""
+
+    def __init__(self, start):
+        self.start = start
+        self.end = start
+        self.text = ""
+        self.plain = True  # only unquoted, unescaped characters
+        self.data = []  # spans of quoted text that the shell does not expand
+        self.inner = []  # spans relaxed inside a $( ) of this word
+
+
+class _Command:
+    """One simple command: its words and the spans of its heredoc bodies that are literal data."""
+
+    def __init__(self):
+        self.words = []
+        self.bodies = []
+
+
+class _Lexer:
+    """Splits a command into simple commands the way bash does, or raises _Unsure."""
 
     def __init__(self, text):
         self.s = text
         self.i = 0
-        self.heredocs = []  # (delimiter, strip_tabs, literal)
+        self.commands = []  # every simple command, at every nesting level
+        self.pending = []  # heredocs waiting for the end of the line: (delimiter, strip_tabs, literal, command, depth)
 
-
-def _quoted(content):
-    """Quoted text: a plain word stays visible without its quotes; anything else becomes DATA."""
-    word = content.strip()
-    return DATA if _NOT_A_WORD.search(word) else word
-
-
-def _scan(st, depth, nested):
-    """Mask text from st.i to the end, or (nested) to the `)` that closes a substitution."""
-    s, out, parens = st.s, [], 0
-    while st.i < len(s):
-        i = st.i
-        plain = _PLAIN.match(s, i)
-        if plain:
-            out.append(plain.group())
-            st.i = plain.end()
-            continue
-        c = s[i]
-        st.i = i + 1
-        if c == "\\":
-            nxt = s[i + 1 : i + 2]
-            st.i = i + 2
-            if nxt != "\n":  # backslash-newline joins lines
-                out.append(nxt if nxt.isalnum() or nxt.isspace() or nxt in KEEP_ESCAPED else "_")
-        elif c == "'":
-            end = s.find("'", st.i)
-            if end < 0:
-                raise _Unsure
-            out.append(_quoted(s[st.i : end]))
-            st.i = end + 1
-        elif c == '"':
-            out.append(_double(st, depth))
-        elif c == "$":
-            out.append(_dollar(st, depth))
-        elif c == "`":
-            raise _Unsure
-        elif c == "#" and (i == 0 or s[i - 1] in " \t\n;&|()<>"):
-            end = s.find("\n", i)
-            st.i = len(s) if end < 0 else end  # a comment runs to the end of the line
-        elif c in "<>":
-            out.append(_angle(st, depth))
-        elif c == "(":
-            parens += 1
-            out.append(c)
-        elif c == ")" and nested and parens == 0:
-            if st.heredocs:
-                raise _Unsure
-            return "".join(out)
-        elif c == ")":
-            parens = max(parens - 1, 0)
-            out.append(c)
-        elif c == "\n":
-            out.append(c)
-            _skip_bodies(st)
-        else:  # `#` inside a word
-            out.append(c)
-    if nested or st.heredocs:
-        raise _Unsure
-    return "".join(out)
-
-
-def _double(st, depth):
-    """Double-quoted text after its opening quote: $( ) inside is code, the rest is data."""
-    s, parts, text = st.s, [], []
-    while True:
-        special = _DQ_SPECIAL.search(s, st.i)
-        if not special:
-            raise _Unsure
-        j = special.start()
-        text.append(s[st.i : j])
-        c = s[j]
-        st.i = j + 1
-        if c == '"':
-            parts.append(_quoted("".join(text)))
-            return "".join(parts)
-        if c == "\\":
-            text.append(s[j + 1 : j + 2])
-            st.i = j + 2
-        elif c == "`" or s.startswith("$((", j):
-            raise _Unsure
-        elif s.startswith("$(", j):
-            parts.append(_quoted("".join(text)))
-            text = []
-            st.i = j + 2
-            parts.append("$(" + _substitution(st, depth) + ")")
-        elif s.startswith("${", j):
-            param = _SIMPLE_PARAM.match(s, j)
-            if not param:
-                raise _Unsure
-            text.append(param.group())
-            st.i = param.end()
-        else:
-            text.append(c)
-
-
-def _dollar(st, depth):
-    """`$` at st.i - 1: ANSI-C or locale quotes, a substitution, a simple parameter, or a plain `$`."""
-    s, i = st.s, st.i - 1
-    if s.startswith("$'", i):
-        ansi = _ANSI_C.match(s, i)
-        if not ansi:
-            raise _Unsure
-        st.i = ansi.end()
-        return _quoted(ansi.group(1))
-    if s.startswith('$"', i):
-        st.i = i + 2
-        return _double(st, depth)
-    if s.startswith("$((", i):
-        raise _Unsure
-    if s.startswith("$(", i):
-        st.i = i + 2
-        return "$(" + _substitution(st, depth) + ")"
-    if s.startswith("${", i):
-        param = _SIMPLE_PARAM.match(s, i)
-        if not param:
-            raise _Unsure
-        st.i = param.end()
-        return param.group()
-    return "$"
-
-
-def _angle(st, depth):
-    """`<` or `>` at st.i - 1: process substitution, here-string, heredoc or a plain redirection."""
-    s, i = st.s, st.i - 1
-    if s.startswith(("<(", ">("), i):
-        st.i = i + 2
-        return s[i] + "(" + _substitution(st, depth) + ")"
-    if s.startswith("<<<", i):
-        st.i = i + 3
-        return "<<<"
-    if s.startswith("<<", i):
-        return _heredoc(st, i)
-    return s[i]
-
-
-def _heredoc(st, i):
-    """Read a heredoc operator and its delimiter; the body follows the next newline."""
-    s = st.s
-    j = _HEREDOC.match(s, i).end()
-    strip_tabs = s.startswith("<<-", i)
-    word, literal = [], False
-    while j < len(s) and s[j] not in " \t\n;&|<>()":
-        c = s[j]
-        if c in ("'", '"'):
-            end = s.find(c, j + 1)
-            if end < 0:
-                raise _Unsure
-            word.append(s[j + 1 : end])
-            literal, j = True, end + 1
-        elif c == "\\":
-            word.append(s[j + 1 : j + 2])
-            literal, j = True, j + 2
-        elif c in "$`":
-            raise _Unsure
-        else:
-            word.append(c)
-            j += 1
-    delimiter = "".join(word)
-    if not delimiter:
-        raise _Unsure
-    st.heredocs.append((delimiter, strip_tabs, literal))
-    st.i = j
-    return s[i:j] + DATA
-
-
-def _skip_bodies(st):
-    """Skip the bodies of the heredocs opened on the line that just ended."""
-    s = st.s
-    for delimiter, strip_tabs, literal in st.heredocs:
-        start = st.i
+    def scan(self, depth):
+        """Simple commands up to the end of the text, or (depth > 0) up to the `)` closing a substitution."""
+        s, cmds, cmd, parens = self.s, [], _Command(), 0
         while True:
-            if st.i >= len(s):
-                raise _Unsure  # no terminator line
-            line_start = st.i
-            end = s.find("\n", line_start)
-            end = len(s) if end < 0 else end
-            st.i = end + 1
-            line = s[line_start:end]
-            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+            self.blanks()
+            if self.i >= len(s):
+                if depth or self.pending:
+                    raise _Unsure
+                self.finish(cmd, cmds)
+                return cmds
+            c = s[self.i]
+            if c == "#":  # a comment: skipped, so its mentions are never relaxed
+                end = s.find("\n", self.i)
+                self.i = len(s) if end < 0 else end
+            elif c in "<>" or s.startswith("&>", self.i):
+                self.redirect(cmd, depth)
+            elif c in ";&|\n()":
+                if s.startswith("((", self.i):
+                    raise _Unsure  # arithmetic
+                self.i += 1
+                cmd = self.finish(cmd, cmds)
+                if c == "\n":
+                    self.bodies(depth)
+                elif c == "(":
+                    parens += 1
+                elif c == ")" and depth and not parens:
+                    if self.pending:
+                        raise _Unsure
+                    return cmds
+                elif c == ")":
+                    parens -= 1
+            else:
+                cmd.words.append(self.word(depth))
+
+    def blanks(self):
+        s = self.s
+        while self.i < len(s) and (s[self.i] in " \t" or s.startswith("\\\n", self.i)):
+            self.i += 1 if s[self.i] in " \t" else 2
+
+    def finish(self, cmd, cmds):
+        """Close a simple command and return a fresh one."""
+        if cmd.words:
+            if cmd.words[0].text == "case":
+                raise _Unsure  # `case` patterns end in `)`
+            cmds.append(cmd)
+            self.commands.append(cmd)
+        return _Command()
+
+    def redirect(self, cmd, depth):
+        """A redirection, whose target is never relaxed; `<<` and `<<-` start a heredoc."""
+        s = self.s
+        if s.startswith(("<(", ">("), self.i):
+            raise _Unsure  # process substitution
+        if s.startswith("<<", self.i) and not s.startswith("<<<", self.i):
+            strip_tabs = s.startswith("<<-", self.i)
+            self.i += 3 if strip_tabs else 2
+            self.blanks()
+            start = self.i
+            delimiter = self.word(depth)
+            if not delimiter.text or "$" in s[start : self.i]:
+                raise _Unsure
+            self.pending.append((delimiter.text, strip_tabs, not delimiter.plain, cmd, depth))
+            return
+        while self.i < len(s) and s[self.i] in "<>&|":
+            self.i += 1
+        self.blanks()
+        target = self.word(depth)
+        if target.end == target.start:
+            raise _Unsure  # a redirection without a target
+
+    def bodies(self, depth):
+        """Read the heredoc bodies that start after the newline just passed."""
+        s, pending, self.pending = self.s, self.pending, []
+        for delimiter, strip_tabs, literal, cmd, level in pending:
+            if level != depth:
+                raise _Unsure
+            start = line_start = self.i
+            while True:
+                if self.i >= len(s):
+                    raise _Unsure  # no terminator line
+                line_start = self.i
+                end = s.find("\n", line_start)
+                end = len(s) if end < 0 else end
+                self.i = end + 1
+                line = s[line_start:end]
+                if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                    break
+            body = s[start:line_start]
+            if not literal and "\\" in body:
+                raise _Unsure  # a backslash-newline could move the terminator line
+            if literal or not any(x in body for x in ("$(", "`", "${")):
+                cmd.bodies.append((start, line_start))
+
+    def word(self, depth):
+        """One word; quoted literal text is recorded as data, and $( ) inside it is scanned as code."""
+        s, w, text = self.s, _Word(self.i), []
+        while self.i < len(s):
+            plain = _PLAIN.match(s, self.i)
+            if plain:
+                text.append(plain.group())
+                self.i = plain.end()
+                continue
+            c = s[self.i]
+            if c in " \t\n;&|()<>":
                 break
-        if not literal and any(x in s[start:line_start] for x in ("$(", "`", "${", "\\")):
-            raise _Unsure  # the shell expands this body
-    st.heredocs = []
+            w.plain = False
+            if c == "\\":
+                text.append(s[self.i + 1 : self.i + 2].strip("\n"))
+                self.i += 2
+            elif c == "'":
+                end = s.find("'", self.i + 1)
+                if end < 0:
+                    raise _Unsure
+                w.data.append((self.i + 1, end))
+                text.append(s[self.i + 1 : end])
+                self.i = end + 1
+            elif c == '"':
+                text.append(self.double(w, depth))
+            elif c == "`":
+                raise _Unsure
+            elif s.startswith("$'", self.i):
+                ansi = _ANSI_C.match(s, self.i)
+                if not ansi:
+                    raise _Unsure
+                w.data.append(ansi.span(1))
+                text.append(ansi.group(1))
+                self.i = ansi.end()
+            elif s.startswith('$"', self.i):
+                self.i += 1
+                text.append(self.double(w, depth))
+            else:
+                self.dollar(w, depth)
+        w.end, w.text = self.i, "".join(text)
+        return w
+
+    def double(self, w, depth):
+        """Double-quoted text from its opening quote: data unless it holds $( ), which is scanned as code."""
+        s, start = self.s, self.i + 1
+        self.i, code = start, False
+        while True:
+            special = _DQ_SPECIAL.search(s, self.i)
+            if not special:
+                raise _Unsure
+            self.i = special.start()
+            c = s[self.i]
+            if c == '"':
+                break
+            if c == "\\":
+                self.i += 2
+            elif c == "`":
+                raise _Unsure
+            else:
+                code = self.dollar(w, depth) or code
+        if not code:
+            w.data.append((start, self.i))
+        self.i += 1
+        return s[start : self.i - 1]
+
+    def dollar(self, w, depth):
+        """`$` here: a $( ) substitution (scanned; returns True), a simple parameter, or a plain `$`."""
+        s, i = self.s, self.i
+        if s.startswith("$((", i):
+            raise _Unsure  # arithmetic
+        if s.startswith("$(", i):
+            if depth >= MAX_DEPTH:
+                raise _Unsure
+            self.i = i + 2
+            w.inner.extend(_accepted(self.scan(depth + 1)))
+            return True
+        param = _SIMPLE_PARAM.match(s, i)
+        if s.startswith("${", i) and not param:
+            raise _Unsure
+        self.i = param.end() if param else i + 1
+        return False
 
 
-def _substitution(st, depth):
-    """Code inside $( ), <( ) or >( ) up to its closing parenthesis."""
-    if depth >= MAX_DEPTH:
-        raise _Unsure
-    inner = _scan(st, depth + 1, True)
-    if _CASE.search(inner):
-        raise _Unsure  # a `case` pattern's `)` would end the substitution too early
-    return inner
+def _values(words, options):
+    """Words that are the value of one of the options (`-m msg`, `--message=msg`)."""
+    return [
+        w for k, w in enumerate(words) if k and (words[k - 1].text in options or w.text.split("=", 1)[0] in options)
+    ]
 
 
-def _mask(command):
-    """The command with heredoc bodies and quoted text replaced by DATA (plain quoted words are kept)."""
-    return _scan(_State(command), 0, False)
+def _data_positions(cmd):
+    """(words whose quoted text is data, whether heredoc bodies are data) for a printer command (rule a)."""
+    words = cmd.words
+    if not words[0].plain or any(_OUTPUT.fullmatch(w.text) for w in words):
+        return [], False
+    name, sub = words[0].text, [w.text for w in words[1:3]]
+    if name in PRINTERS:
+        return words[1:], True
+    if name == "tee":
+        return [], True
+    if name == "git" and sub and sub[0] in GIT_DATA:
+        return words[2:], False
+    if name == "git" and sub and sub[0] in GIT_MESSAGE:
+        return _values(words, {"-m", "--message"}), False
+    if name == "gh" and len(sub) == 2 and sub[0] in GH_OBJECTS and sub[1] in GH_VERBS:
+        stdin = any(words[k].text in {"--body-file", "-F"} and words[k + 1].text == "-" for k in range(len(words) - 1))
+        return _values(words, {"--body", "--title", "-b", "-t"}), stdin
+    return [], False
 
 
-def _norm(word):
-    return _NOISE.sub("", word).lower()
+def _accepted(cmds):
+    """Relaxed data spans of these commands, including data printed inside a $( ) that is itself data."""
+    spans = []
+    for cmd in cmds:
+        words, stdin = _data_positions(cmd)
+        if stdin:
+            spans.extend(cmd.bodies)
+        for w in words:
+            spans.extend(w.data + w.inner)
+    return spans
 
 
-def _base(word):
-    """Command name without its directory (and without zsh's `=` path expansion)."""
-    return word.lstrip("=").rsplit("/", 1)[-1]
+def _inert(cmd):
+    """True for commands that cannot run text or files as code."""
+    head = cmd.words[0]
+    sub = cmd.words[1].text if len(cmd.words) > 1 else ""
+    if not head.plain:
+        return False
+    if head.text == "git":
+        return sub in GIT_DATA | GIT_MESSAGE
+    if head.text == "gh":
+        return sub in GH_OBJECTS
+    return head.text in INERT
 
 
-def _command(words):
-    """The words of a simple command after leading keywords, assignments and redirections."""
-    i = 0
-    while i < len(words):
-        word = words[i]
-        if word in KEYWORDS or _ASSIGNMENT.match(word):
-            i += 1
-        elif _REDIRECT_OP.fullmatch(word):
-            i += 2
-        elif _REDIRECT_WORD.match(word):
-            i += 1
-        else:
-            break
-    return words[i:]
-
-
-def _prints_only(cmd):
-    """True for commands that only print, search or record text, so quoted text and heredocs are data for them."""
-    name = _base(cmd[0])
+def _reads(cmd):
+    """Spans of plain arguments of read-only commands (rule b; relaxes marker mentions only)."""
+    words = cmd.words
+    if not words[0].plain or any(_OUTPUT.fullmatch(w.text) for w in words):
+        return []
+    name = words[0].text
     if name == "git":
-        return len(cmd) > 1 and cmd[1] in GIT_PRINTERS
-    if name == "gh":
-        return len(cmd) > 2 and cmd[1] in GH_OBJECTS and cmd[2] in GH_PRINTERS
-    return name in PRINTERS
+        first = 2 if len(words) > 1 and words[1].text in GIT_READ else len(words)
+    else:
+        first = 1 if name in READERS else len(words)
+    return [
+        (w.start, w.end)
+        for k, w in enumerate(words[first:], first)
+        if w.plain and not w.text.startswith("-") and (name not in TESTS or words[k - 1].text in {"-f", "-e", "-s"})
+    ]
 
 
-def _is_marker(cmd, k):
-    """cmd[k] names an APPROVED file and is not a commit message (`-m APPROVED`)."""
-    word = cmd[k]
-    is_message = word.startswith("--message=") or (k > 0 and cmd[k - 1] in ("-m", "--message"))
-    return not is_message and _MARKER.search(word) is not None
-
-
-def _verdict(words, has_data):
-    """APPROVE_WHY, MARKER_WHY, UNSURE or None for one simple command, given as normalised words."""
-    cmd = _command(words)
-    if not cmd:
-        return UNSURE if has_data else None
-    printer = _prints_only(cmd)
-    approve = max((k for k, w in enumerate(cmd) if w == "approve-spec"), default=-1)
-    marker = max((k for k in range(len(cmd)) if _is_marker(cmd, k)), default=-1)
-    makes_text = any(_MAKE_READS_TEXT.match(w) for w in cmd)
-    git_runs_text = any(_GIT_RUNS_TEXT.fullmatch(w) for w in cmd)
-    in_place = any(_SED_IN_PLACE.match(w) for w in cmd)
-    git_writes = not GIT_WRITERS.isdisjoint(cmd)
-    for k, word in enumerate(cmd[:1] if printer else cmd):
-        name = _base(word)
-        if _INTERPRETER.fullmatch(name) or (name in MAKES and makes_text) or (name == "git" and git_runs_text):
-            return UNSURE
-        if name in RUNNERS and k < approve:
-            return APPROVE_WHY
-        if k < marker and (name in WRITERS or (name == "sed" and in_place) or (name == "git" and git_writes)):
-            return MARKER_WHY
-    return UNSURE if has_data and not printer else None
-
-
-def _mention(command):
-    """Fail-closed check used when the lexer is unsure: any mention blocks (the pre-IDP-14 behaviour)."""
-    found = MENTION.search(command)
-    if not found:
-        return None
-    return APPROVE_WHY if found.group().lower() == "approve-spec" else MARKER_WHY
+def _covered(spans, start, end):
+    """True if [start, end) lies inside one of the sorted, disjoint spans."""
+    k = bisect.bisect_right(spans, (start, float("inf"))) - 1
+    return k >= 0 and spans[k][1] >= end
 
 
 def approval_violation(command):
-    """Block running spec approval or writing an APPROVED marker; mentions alone pass unless the lexer is unsure."""
+    """Block a mention of spec approval or of the APPROVED marker unless the lexer relaxed its position."""
+    mentions = [(m.start(), m.end(), m.group().lower() == "approve-spec") for m in MENTION.finditer(command)]
+    if not mentions:
+        return None
+    data, reads = [], []
     try:
-        masked = _mask(command)
+        lexer = _Lexer(command)
+        cmds = lexer.scan(0)
+        reads = [span for cmd in lexer.commands for span in _reads(cmd)]
+        if all(_inert(cmd) for cmd in lexer.commands):
+            data = _accepted(cmds)
     except _Unsure:
-        return _mention(command)
-    for target in _REDIRECT.findall(masked):
-        if _MARKER.search(_norm(target)):
-            return MARKER_WHY
-    unsure = False
-    for segment in _SEPARATORS.split(masked):
-        words = [w for w in map(_norm, segment.split()) if w]
-        verdict = _verdict(words, DATA in segment)
-        if verdict == UNSURE:
-            unsure = True
-        elif verdict:
-            return verdict
-    return _mention(command) if unsure else None
+        data, reads = [], []
+    data.sort()
+    marker_spans = sorted(data + reads)
+    left = [run for start, end, run in mentions if not _covered(data if run else marker_spans, start, end)]
+    if not left:
+        return None
+    return APPROVE_WHY if any(left) else MARKER_WHY
 
 
 def check(command):
@@ -432,6 +389,8 @@ def check(command):
 def main():
     data = json.load(sys.stdin)
     command = (data.get("tool_input") or {}).get("command") or ""
+    if not isinstance(command, str):
+        command = json.dumps(command)  # never crash: a crash (exit 1) would not block
     why = check(command)
     if why:
         sys.stderr.write(
