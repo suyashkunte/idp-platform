@@ -3,14 +3,14 @@
   "owner": { "name": "Suyash Kunte", "url": "https://github.com/suyashkunte" },
   "metadata": {
     "description": "Intelligent Delivery Pipeline: spec-driven, gated, agentic delivery for any application",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "plugins": [
     {
       "name": "idp-agentic",
       "source": "./plugins/idp-agentic",
       "description": "Spec-driven ticket-to-PR workflow: skills, subagents and guardrail hooks (design doc §21)",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "category": "development"
     }
   ]
