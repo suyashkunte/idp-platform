@@ -69,8 +69,8 @@ bypass.
       backticks in them are data (ASSUMPTION A9);
     - (ii) the printer has no output-writing or command-running option: a word matching
       `-o.*|--output.*|of=.*|-w|--pre.*|-O.*|--open-files-in-pager.*`. `sort` is not a printer;
-    - (iii) its output cannot reach code. Every simple command in the whole input must be "inert" (Q8): a printer,
-      a reader, `tee`, `cd`, `mkdir`, `pwd`, `false`, `git log|show|status|diff|grep|commit|tag|notes` or
+    - (iii) its output cannot reach code. Every simple command in the whole input must be "inert" (Q8; amendment 2:
+      not `test`, `[` or `[[`): a printer, a reader, `tee`, `cd`, `mkdir`, `pwd`, `false`, `git log|show|status|diff|grep|commit|tag|notes` or
       `gh pr|issue|release`. Its head must be a plain unquoted word, with no `VAR=x` prefix. So `| sh`, `| $SHELL`,
       `| sudo -s`, `| xargs`, `; bash x.sh`, `$m ...`, compound commands (`if`, `for`, `{ }`) and assignments disable
       every DATA relaxation;
@@ -79,7 +79,8 @@ bypass.
 
     Printers and their DATA positions:
     - `cat`, `echo`, `printf`, `grep`, `egrep`, `fgrep`, `rg`, `head`, `tail`, `wc`, `jq`, `test`, `[`, `[[`,
-      `true`, `:`: every argument, and heredoc stdin;
+      `true`, `:`: every argument, and heredoc stdin. (Amendment 2: `test`, `[` and `[[` are removed, and `printf`
+      with a `-v` word gives no DATA.)
     - `tee`: heredoc stdin only (its file arguments are never relaxed);
     - `git log|show|status|diff|grep`: every argument after the subcommand;
     - `git commit|tag|notes`: only the value of `-m`/`--message` (`--message=`). A quoted pathspec is never data;
@@ -148,6 +149,50 @@ they are. Four would now block and change as follows (none is silently dropped):
 
 Q7 asks whether unquoted plain words given to printers should be relaxed too, which would keep the first, second
 and fourth cases unchanged.
+
+## Amendment 2 (2026-10-20, after review loop 2)
+State: amendment 1 approved (cf33b1e), H2 placed (d4353ba), T4 tests committed (eabb846).
+
+**Finding.** Review loop 2 confirmed 5 regressions. Each is an AC-1 bypass: H2 allows it, main blocks it, and bash
+really runs `make` (checked with a fake `make` on bash 3.2 (macOS) and bash 5.2 (Debian)). The cause is that bash
+evaluates array subscripts arithmetically, and that arithmetic expands the `$( )` written inside a single-quoted
+argument of a builtin that H2 treats as a printer:
+1. `[[ 'a[$(make approve-spec)]' -eq 0 ]]` (bash 3.2 and 5.2)
+2. `test -v 'a[$(make approve-spec)]'` (bash >= 4.2)
+3. `[ -v 'a[$(make approve-spec)]' ]`
+4. `[[ -v 'a[$(make approve-spec)]' ]]`
+5. `printf -v 'a[$(make approve-spec)]' x`
+
+Not executed on bash 5.2: `test 'a[$(...)]' -eq 0`, `[ ... -eq 0 ]`, `printf '%d' 'a[$(...)]'`, `head -n`, `wc`. The
+design still does not rely on per-operator lists for `test`/`[`/`[[`.
+
+**Decision (human; smallest fix).**
+- `test`, `[` and `[[` are removed from the DATA printers entirely. Their quoted arguments are never data.
+  - Their plain read form (`test -f/-e/-s <marker>`, `[ -f <marker> ]`, `[[ -e <marker> ]]`) stays relaxed through
+    READ only. READ relaxes unquoted plain marker words, never `approve-spec` and never quoted text.
+  - A plain unquoted word contains no `$`, so it cannot carry a substitution.
+- `test`, `[` and `[[` are also removed from the inert set (Q8). So `[[ ... ]] && echo 'approve-spec'` and
+  `test -f <marker> && echo 'approve-spec'` block: a non-inert command disables every DATA relaxation.
+- `printf` with a `-v` option (`-v name` or `-vname` glued, that is any word starting with `-v`) gives no DATA
+  relaxation. The check is specific to `printf`, so `grep -v 'approve-spec'` keeps its relaxation. `printf` without
+  `-v` stays a printer (`printf '%s\n' '...' > notes.md`).
+- Nothing in the lexer handles `]` or `]]` specially: they are ordinary words. Only `_reads` uses `TESTS` (the
+  `-f`/`-e`/`-s` rule), and that stays.
+
+**Verdict changes.**
+- None of the committed test cases in `tests/plugin/test_hooks.py` (eabb846) changes verdict:
+  - `test -f specs/IDP-14/APPROVED && echo present` stays allowed: the marker path is relaxed by READ, and the other
+    words hold no mention;
+  - `test -f specs/IDP-14/APPROVED && echo approved` stays blocked (marker reason);
+  - no other case uses `test`, `[`, `[[` or `printf -v`.
+- New behaviour outside the tests: quoted mentions given to `test`/`[`/`[[` (`[ "$x" = 'approve-spec' ]`), and any
+  mention-only DATA in a command that also contains `test`/`[`/`[[` or `printf -v`, now block. This is the same as
+  on main.
+
+### Amendment log (continued)
+- Amendment 2 (2026-10-20, after review loop 2): `test`/`[`/`[[` removed from the DATA printers and from the inert
+  set; `printf -v` disables DATA. AC-1..AC-5 text unchanged; AC-3 gets an "Amendment 2" note. H3 and T5 added. No
+  committed test case changes verdict.
 
 ## Requirements
 - **AC-1** Given a command that _executes_ `make approve-spec`, `uv run idp approve-spec` or `idp approve-spec` (at command start, or after `;`, `&&`, `||`, `|` or `$(`), when guard_bash runs, then it blocks.
@@ -229,6 +274,9 @@ and fourth cases unchanged.
     - Plain quoted words (`'approve-spec'`) are data again; that is safe because a printer only prints them.
     - Unquoted mentions given to printers and mentions in comments now block (A4 superseded, Q7).
     - Four MENTIONS_ONLY cases change (see "MENTIONS_ONLY under amendment 1"); all others stay allowed.
+  - Amendment 2: `test`, `[` and `[[` are no longer printers or inert. Their marker paths are relaxed only through
+    READ. `printf -v` gives no DATA. Verified by the amendment 2 cases in `test_running_spec_approval_is_blocked`,
+    `test_approval_check_fails_closed_when_unsure` and `test_mentioning_approval_as_text_is_allowed`.
 - **AC-4** Given the existing blocked/allowed command lists in `tests/plugin/test_hooks.py`, then they all still pass.
   - The two lists and both test bodies stay unchanged (no command added, removed or edited). Each test gains a stacked
     `@pytest.mark.ac("IDP-14:AC-4")` next to its existing `IDP-10:AC-3` mark, so `idp spec-trace IDP-14` sees AC-4.
