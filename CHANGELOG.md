@@ -28,6 +28,10 @@ versions follow [Semantic Versioning](https://semver.org/).
   defaults; no `pyproject.toml`, not a workspace member) and `idp conformance [DIR]` (default `examples`: runs
   `idp validate` and `make verify` for each example with an `idp.yaml`, one PASS/FAIL line each plus a summary; exit 0
   all passed, 1 any failed, 2 refused). Root `make conformance`, run by `make verify`.
+- IDP-31: ADR-0013 conformance trust model: `idp validate` and the conformance scan are a fail-closed, best-effort
+  correctness check, not a security boundary (that is the IDP-23 sandbox plus least-privilege roles); scanner
+  hardening only for regressions or bypasses in jobs that hold credentials or run code they didn't write; IDP-29/IDP-30
+  parked. The service contract and onboarding residual-risk texts link it.
 
 ### Changed
 - IDP-12: pin GitHub Actions runners to `ubuntu-24.04`; a test fails on any other `runs-on`.
